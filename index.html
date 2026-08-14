@@ -1,0 +1,1152 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Retro Dungeon Crawler</title>
+<style>
+  /* R102: black background, limited entity-color palette. */
+  html, body {
+    margin: 0;
+    padding: 0;
+    height: 100%;
+    background: #000;
+    color: #9e9e9e;
+    font-family: "Courier New", Courier, monospace;
+    overflow: hidden;
+  }
+  #app {
+    display: flex;
+    flex-direction: column;
+    height: 100vh;
+  }
+  /* FR-033: compact header, max 3 text lines, stats+log left, hint right. */
+  #hud {
+    flex: 0 0 auto;
+    display: flex;
+    justify-content: space-between;
+    gap: 16px;
+    padding: 2px 8px;
+    font-size: 14px;
+    line-height: 18px;
+    max-height: 54px; /* 3 lines x 18px */
+    overflow: hidden;
+    border-bottom: 1px solid #333;
+  }
+  #hud-left { min-width: 0; flex: 1 1 auto; }
+  #stats { color: #fff; white-space: nowrap; }
+  #stats span { margin-right: 14px; }
+  #hud-log {
+    height: 36px; /* 2 lines */
+    overflow-y: auto;
+    scrollbar-width: none;
+    white-space: pre;
+    color: #9e9e9e;
+  }
+  #hud-log::-webkit-scrollbar { display: none; }
+  #hint {
+    flex: 0 0 auto;
+    color: #9e9e9e;
+    white-space: nowrap;
+    align-self: flex-start;
+  }
+  /* FR-033/FR-034: grid fills remaining viewport, centered, scrollable
+     on both axes with no visible scrollbars. */
+  #viewport {
+    flex: 1 1 auto;
+    overflow: auto;
+    scrollbar-width: none;
+    outline: none;
+  }
+  #viewport::-webkit-scrollbar { display: none; }
+  #grid {
+    /* Centered when narrower than the viewport, fully scrollable when
+       wider (FR-033/FR-034). */
+    width: max-content;
+    margin: 0 auto;
+    line-height: 0;
+  }
+  .row { white-space: nowrap; height: 16px; }
+  .cell {
+    display: inline-block;
+    width: 16px;
+    height: 16px;
+    font-size: 14px;
+    line-height: 16px;
+    text-align: center;
+    vertical-align: top;
+  }
+  /* Palette (R102): walls & staircase grey, dimmed fog dark grey,
+     player white, enemies light brown, items light blue. */
+  .hid { color: #000; background: #000; }
+  .dim { color: #4a4a4a; }
+  .ter { color: #9e9e9e; }
+  .st  { color: #9e9e9e; }
+  .pl  { color: #ffffff; }
+  .en  { color: #c89b6a; }
+  .it  { color: #9bd4f5; }
+  /* FR-035: full-viewport overlays, invisible when inactive. */
+  .overlay {
+    display: none;
+    position: fixed;
+    inset: 0;
+    background: #000;
+    z-index: 10;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 14px;
+    font-size: 16px;
+  }
+  .overlay.active { display: flex; }
+  .overlay h1 { color: #fff; font-size: 28px; margin: 0; letter-spacing: 4px; }
+  #inv-list { text-align: left; }
+  .inv-slot { color: #9e9e9e; padding: 1px 0; white-space: pre; }
+  .inv-slot.sel { color: #fff; }
+  .overlay .dim-text { color: #4a4a4a; }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="hud">
+    <div id="hud-left">
+      <div id="stats">
+        <span id="stat-hp"></span><span id="stat-atk"></span><span id="stat-def"></span><span id="stat-lvl"></span><span id="stat-floor"></span>
+      </div>
+      <div id="hud-log"></div>
+    </div>
+    <div id="hint">WASD/Arrows to move · I for inventory · Reach &gt; to descend</div>
+  </div>
+  <div id="viewport"><div id="grid"></div></div>
+</div>
+
+<div id="inventory" class="overlay">
+  <h1>INVENTORY</h1>
+  <div id="inv-equipped"></div>
+  <div id="inv-list"></div>
+  <div class="dim-text">Arrows: select · Enter: use/equip · Esc: close</div>
+</div>
+
+<div id="gameover" class="overlay">
+  <h1>YOU DIED</h1>
+  <div id="gameover-stats"></div>
+  <div>Press R to restart</div>
+</div>
+
+<div id="victory" class="overlay">
+  <h1>VICTORY</h1>
+  <div>You conquered the dungeon.</div>
+  <div id="victory-stats"></div>
+  <div>Press R to restart</div>
+</div>
+
+<script>
+// Retro Dungeon Crawler — shipped artifact.
+// GENERATED FILE: built from src/*.js by build.mjs — edit the sources,
+// then run `npm run build`. Single non-module script block per FR-014.
+'use strict';
+
+// ===== src/logger.js =====
+// Structured developer-facing logging (FR-037): timestamp, level,
+// component, message — emitted via console (DevTools only), never
+// rendered in the game UI. Distinct from the player-facing HUD log.
+
+function createLogger(component) {
+  function emit(level, message, data) {
+    const event = {
+      ts: new Date().toISOString(),
+      level,
+      component,
+      message,
+    };
+    if (data !== undefined) event.data = data;
+    // console.error is reserved for real faults: the artifact smoke test
+    // (SC-008) requires zero console.error during normal play, so the
+    // error level is only used when something is genuinely broken.
+    const fn =
+      level === 'error' ? console.error : level === 'warn' ? console.warn : console.info;
+    fn(JSON.stringify(event));
+  }
+  return {
+    info: (message, data) => emit('info', message, data),
+    warn: (message, data) => emit('warn', message, data),
+    error: (message, data) => emit('error', message, data),
+  };
+}
+
+// ===== src/rng.js =====
+// Seeded RNG (mulberry32) + seed parsing (FR-038).
+// All game randomness flows through one Rng instance per run.
+
+function mulberry32(seed) {
+  let a = seed >>> 0;
+  return function next() {
+    a |= 0;
+    a = (a + 0x6d2b79f5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+function createRng(seed) {
+  const next = mulberry32(seed);
+  return {
+    seed,
+    // float in [0, 1)
+    next,
+    // integer in [min, max] inclusive
+    int(min, max) {
+      return min + Math.floor(next() * (max - min + 1));
+    },
+    // random element of a non-empty array
+    pick(arr) {
+      return arr[Math.floor(next() * arr.length)];
+    },
+    // true with probability p
+    chance(p) {
+      return next() < p;
+    },
+  };
+}
+
+// Parse `?seed=N` from a query string. Returns the integer seed, or null
+// when the parameter is absent or not an integer (FR-038: NaN falls back
+// to auto-generated seed upstream; no error shown).
+function parseSeed(search) {
+  const params = new URLSearchParams(search);
+  if (!params.has('seed')) return null;
+  const n = Number.parseInt(params.get('seed'), 10);
+  return Number.isNaN(n) ? null : n;
+}
+
+// ===== src/entities.js =====
+// Entities and combat math: player, enemies, items (Key Entities section,
+// FR-006, FR-010, FR-021, FR-023).
+
+const GRID_SIZE = 80;
+const SIGHT_RADIUS = 5; // R100, Chebyshev
+const INVENTORY_CAP = 10; // FR-009
+const MAX_FLOOR = 9; // R101: stairs on floor 9 => victory, no floor 10
+
+// FR-023: base stats.
+function createPlayer() {
+  return {
+    x: 0,
+    y: 0,
+    hp: 20,
+    maxHp: 20,
+    baseAttack: 5,
+    baseDefense: 1,
+    inventory: [], // ordered, max INVENTORY_CAP
+    weapon: null, // equipped weapon item or null
+    armor: null, // equipped armor item or null
+  };
+}
+
+function playerAttack(player) {
+  return player.baseAttack + (player.weapon ? player.weapon.value : 0);
+}
+
+function playerDefense(player) {
+  return player.baseDefense + (player.armor ? player.armor.value : 0);
+}
+
+// FR-021: deterministic damage, minimum 1.
+function damage(attackValue, defenseValue) {
+  return Math.max(1, attackValue - defenseValue);
+}
+
+// FR-006: enemy type by floor range.
+function enemyTypeForFloor(floor) {
+  if (floor <= 3) return { type: 'Goblin', glyph: 'g' };
+  if (floor <= 6) return { type: 'Orc', glyph: 'o' };
+  return { type: 'Wraith', glyph: 'w' };
+}
+
+// Enemy entity: HP = 10 + floor*5, attack = 3 + floor*2, defense = floor.
+function createEnemy(floor, x, y, roomIndex) {
+  const { type, glyph } = enemyTypeForFloor(floor);
+  const hp = 10 + floor * 5;
+  return {
+    x,
+    y,
+    hp,
+    maxHp: hp,
+    attack: 3 + floor * 2,
+    defense: floor,
+    type,
+    glyph,
+    roomIndex,
+    activated: false, // R103: room-wide aggro on player entry
+    alive: true,
+  };
+}
+
+// Item glyphs (FR-012, retro ASCII).
+const ITEM_GLYPHS = { potion: '!', weapon: '/', armor: ']' };
+
+// Item entity: values scale with floor.
+function makePotion(floor) {
+  const value = 10 + floor * 5;
+  return { type: 'potion', value, glyph: ITEM_GLYPHS.potion, name: `Health Potion (+${value} HP)` };
+}
+
+function makeWeapon(floor, rng) {
+  const value = floor + rng.int(0, 2);
+  return { type: 'weapon', value, glyph: ITEM_GLYPHS.weapon, name: `Sword (+${value} ATK)` };
+}
+
+function makeArmor(floor, rng) {
+  const value = floor + rng.int(0, 2);
+  return { type: 'armor', value, glyph: ITEM_GLYPHS.armor, name: `Armor (+${value} DEF)` };
+}
+
+function makeRandomItem(floor, rng) {
+  const roll = rng.int(0, 2);
+  if (roll === 0) return makePotion(floor);
+  if (roll === 1) return makeWeapon(floor, rng);
+  return makeArmor(floor, rng);
+}
+
+// ===== src/dungeon.js =====
+// Dungeon floor generation (FR-002, FR-013, FR-017, FR-020, FR-024,
+// FR-025, FR-028, FR-039): BSP partitioning into rectangular rooms
+// connected by corridors, plus the deterministic seed-99999 test layout.
+
+
+const TILE = { WALL: '#', FLOOR: '.', STAIRS: '>' };
+
+const TEST_SEED = 99999;
+
+function emptyGrid() {
+  const grid = new Array(GRID_SIZE);
+  for (let y = 0; y < GRID_SIZE; y++) grid[y] = new Array(GRID_SIZE).fill(TILE.WALL);
+  return grid;
+}
+
+function carveRoom(grid, room) {
+  for (let y = room.y; y < room.y + room.h; y++) {
+    for (let x = room.x; x < room.x + room.w; x++) grid[y][x] = TILE.FLOOR;
+  }
+}
+
+function carveRect(grid, x0, y0, x1, y1) {
+  for (let y = Math.min(y0, y1); y <= Math.max(y0, y1); y++) {
+    for (let x = Math.min(x0, x1); x <= Math.max(x0, x1); x++) grid[y][x] = TILE.FLOOR;
+  }
+}
+
+function roomCenter(room) {
+  return { x: room.x + Math.floor(room.w / 2), y: room.y + Math.floor(room.h / 2) };
+}
+
+// --- BSP partitioning (Clarification D4) -------------------------------
+
+const MIN_LEAF = 14; // leaves large enough for a >=5x5 room + 1-tile margin
+const MIN_ROOM = 5;
+
+function splitLeaves(rng) {
+  const leaves = [];
+  function split(x, y, w, h, depth) {
+    const canSplitH = h >= MIN_LEAF * 2;
+    const canSplitV = w >= MIN_LEAF * 2;
+    if (depth <= 0 || (!canSplitH && !canSplitV)) {
+      leaves.push({ x, y, w, h });
+      return;
+    }
+    let vertical;
+    if (canSplitH && canSplitV) vertical = rng.chance(0.5);
+    else vertical = canSplitV;
+    if (vertical) {
+      const cut = rng.int(MIN_LEAF, w - MIN_LEAF);
+      split(x, y, cut, h, depth - 1);
+      split(x + cut, y, w - cut, h, depth - 1);
+    } else {
+      const cut = rng.int(MIN_LEAF, h - MIN_LEAF);
+      split(x, y, w, cut, depth - 1);
+      split(x, y + cut, w, h - cut, depth - 1);
+    }
+  }
+  // Keep a 1-tile wall border around the whole grid.
+  split(1, 1, GRID_SIZE - 2, GRID_SIZE - 2, 4);
+  return leaves;
+}
+
+// --- Public API ---------------------------------------------------------
+
+// Generates a complete floor synchronously (FR-017, FR-028).
+// Returns { grid, rooms, spawn, stairs, enemies, items,
+//           startRoomIndex, stairsRoomIndex, floor }.
+function generateFloor(floor, rng, seed) {
+  if (seed === TEST_SEED && floor === 1) return buildTestFloor();
+  return buildProceduralFloor(floor, rng);
+}
+
+function buildProceduralFloor(floor, rng) {
+  const grid = emptyGrid();
+  const leaves = splitLeaves(rng);
+  const rooms = [];
+  for (const leaf of leaves) {
+    const maxW = Math.min(leaf.w - 2, 16);
+    const maxH = Math.min(leaf.h - 2, 16);
+    const w = rng.int(MIN_ROOM, maxW);
+    const h = rng.int(MIN_ROOM, maxH);
+    const x = leaf.x + rng.int(1, leaf.w - w - 1);
+    const y = leaf.y + rng.int(1, leaf.h - h - 1);
+    const room = { x, y, w, h };
+    rooms.push(room);
+    carveRoom(grid, room);
+  }
+  // Connectivity by construction (FR-013): chain successive room centers
+  // with L-shaped corridors (a horizontal strip then a vertical strip).
+  for (let i = 1; i < rooms.length; i++) {
+    const a = roomCenter(rooms[i - 1]);
+    const b = roomCenter(rooms[i]);
+    if (rng.chance(0.5)) {
+      carveRect(grid, a.x, a.y, b.x, a.y);
+      carveRect(grid, b.x, a.y, b.x, b.y);
+    } else {
+      carveRect(grid, a.x, a.y, a.x, b.y);
+      carveRect(grid, a.x, b.y, b.x, b.y);
+    }
+  }
+
+  // FR-024: start room and stairs room are distinct random rooms.
+  const startRoomIndex = rng.int(0, rooms.length - 1);
+  let stairsRoomIndex = rng.int(0, rooms.length - 1);
+  while (stairsRoomIndex === startRoomIndex) stairsRoomIndex = rng.int(0, rooms.length - 1);
+
+  const spawn = roomCenter(rooms[startRoomIndex]);
+  const stairsRoom = rooms[stairsRoomIndex];
+  const stairs = {
+    x: stairsRoom.x + rng.int(0, stairsRoom.w - 1),
+    y: stairsRoom.y + rng.int(0, stairsRoom.h - 1),
+  };
+  grid[stairs.y][stairs.x] = TILE.STAIRS;
+
+  // Floor items: 1-3 per floor on random walkable tiles, at most one item
+  // per tile, never on the staircase or the spawn tile (FR-025).
+  const items = [];
+  const itemCount = rng.int(1, 3);
+  let guard = 0;
+  while (items.length < itemCount && guard++ < 500) {
+    const room = rng.pick(rooms);
+    const x = room.x + rng.int(0, room.w - 1);
+    const y = room.y + rng.int(0, room.h - 1);
+    if (grid[y][x] !== TILE.FLOOR) continue;
+    if (x === spawn.x && y === spawn.y) continue;
+    if (items.some((it) => it.x === x && it.y === y)) continue;
+    const item = makeRandomItem(floor, rng);
+    item.x = x;
+    item.y = y;
+    items.push(item);
+  }
+
+  // FR-006: 1-3 enemies per non-starting room; never in the start room;
+  // never on stairs or item tiles; one enemy per tile.
+  const enemies = [];
+  rooms.forEach((room, roomIndex) => {
+    if (roomIndex === startRoomIndex) return;
+    const count = rng.int(1, 3);
+    let placed = 0;
+    let tries = 0;
+    while (placed < count && tries++ < 60) {
+      const x = room.x + rng.int(0, room.w - 1);
+      const y = room.y + rng.int(0, room.h - 1);
+      if (grid[y][x] !== TILE.FLOOR) continue;
+      if (items.some((it) => it.x === x && it.y === y)) continue;
+      if (enemies.some((e) => e.x === x && e.y === y)) continue;
+      enemies.push(createEnemy(floor, x, y, roomIndex));
+      placed++;
+    }
+    // A room with no valid placement tiles simply has fewer/zero enemies
+    // (Edge Cases): acceptable, not an error.
+  });
+
+  return { grid, rooms, spawn, stairs, enemies, items, startRoomIndex, stairsRoomIndex, floor };
+}
+
+// --- Deterministic test dungeon, seed 99999, floor 1 (FR-039) -----------
+//
+// Hub layout, all coordinates fixed:
+//
+//                [ Room D 37..43 x 24..28 ]  stairs (40,26)
+//                        | corridor 39..41 x 29..36 (8 long, 3 wide)
+//   [ Room A 37..43 x 37..43 ]--corridor 44..51 x 39..41--[ Room B 52..60 x 36..44 ]
+//        spawn (40,40)                                       1 Goblin + 11 items
+//                        | corridor 39..41 x 44..51
+//                [ Room C 36..44 x 52..60 ]  3 Goblins
+function buildTestFloor() {
+  const floor = 1;
+  const grid = emptyGrid();
+  const roomA = { x: 37, y: 37, w: 7, h: 7 }; // start hub, 7x7 (min 5x5)
+  const roomB = { x: 52, y: 36, w: 9, h: 9 }; // combat/items, 9x9 (min 7x7)
+  const roomC = { x: 36, y: 52, w: 9, h: 9 }; // death room, 9x9 (min 7x7)
+  const roomD = { x: 37, y: 24, w: 7, h: 5 }; // descent room, 7x5 (min 5x5)
+  const rooms = [roomA, roomB, roomC, roomD];
+  rooms.forEach((r) => carveRoom(grid, r));
+  // Corridors: exactly 8 tiles long, 3 tiles wide, one per room, all
+  // branching directly from Room A (independent access).
+  carveRect(grid, 44, 39, 51, 41); // right  -> Room B
+  carveRect(grid, 39, 44, 41, 51); // down   -> Room C
+  carveRect(grid, 39, 29, 41, 36); // up     -> Room D
+
+  const spawn = { x: 40, y: 40 }; // center of Room A
+  const stairs = { x: 40, y: 26 }; // within 3 tiles of Room D entrance (40,28)
+  grid[stairs.y][stairs.x] = TILE.STAIRS;
+
+  // Room B: exactly one Goblin, within sight radius (5) of the room
+  // entrance column x=52 so it activates on entry (R103).
+  // Room C: exactly three Goblins, all within sight radius of entrance
+  // (40,52).
+  const enemies = [
+    createEnemy(floor, 56, 40, 1),
+    createEnemy(floor, 38, 56, 2),
+    createEnemy(floor, 40, 56, 2),
+    createEnemy(floor, 42, 56, 2),
+  ];
+  // FR-039 requires every enemy to still be within the player's sight
+  // radius when the room is entered, and the layout to stay fully
+  // deterministic for automated tests. Random idle patrol (R103) would
+  // wander them off their mandated positions, so test-floor enemies hold
+  // position until activated. Procedural floors patrol normally.
+  enemies.forEach((e) => (e.patrol = false));
+
+  // Room B: exactly eleven items — at least one of each type, one per
+  // tile, none on the Goblin's tile, all deterministic.
+  const fixedRng = { int: () => 1, next: () => 0, pick: (a) => a[0], chance: () => false };
+  const items = [];
+  const place = (item, x, y) => {
+    item.x = x;
+    item.y = y;
+    items.push(item);
+  };
+  place(makePotion(floor), 54, 38);
+  place(makePotion(floor), 55, 38);
+  place(makePotion(floor), 56, 38);
+  place(makePotion(floor), 57, 38);
+  place(makeWeapon(floor, fixedRng), 54, 42);
+  place(makeWeapon(floor, fixedRng), 55, 42);
+  place(makeWeapon(floor, fixedRng), 56, 42);
+  place(makeWeapon(floor, fixedRng), 57, 42);
+  place(makeArmor(floor, fixedRng), 53, 40);
+  place(makeArmor(floor, fixedRng), 54, 40);
+  place(makeArmor(floor, fixedRng), 55, 40);
+
+  return {
+    grid,
+    rooms,
+    spawn,
+    stairs,
+    enemies,
+    items,
+    startRoomIndex: 0,
+    stairsRoomIndex: 3,
+    floor,
+  };
+}
+
+// ===== src/game.js =====
+// Core game engine: turn resolution, movement, combat, fog-of-war,
+// inventory, floor descent, run lifecycle. DOM-free — the renderer and
+// input layers sit on top; the unit suite imports this module directly.
+
+
+const LOG_CAP = 50; // FR-018 rolling buffer
+const DROP_CHANCE = 0.25; // US2-AS5
+
+const log = createLogger('game');
+
+class Game {
+  // seed: integer run seed (FR-038).
+  constructor(seed) {
+    this.seed = seed;
+    this.startRun();
+  }
+
+  startRun() {
+    this.rng = createRng(this.seed);
+    this.player = createPlayer();
+    this.floorNum = 1;
+    this.enemiesDefeated = 0;
+    this.state = 'playing'; // playing | inventory | gameover | victory
+    this.hudLog = [];
+    this.hasDescended = false; // SC-006: controls-hint visibility
+    this.invCursor = 0;
+    this.enterFloor(1);
+    this.addLog('You enter the dungeon. Reach > to descend.');
+    log.info('run started', { seed: this.seed });
+  }
+
+  // Restart after game-over/victory (FR-008, R101). A new seed may be
+  // supplied (auto-seeded runs re-roll; ?seed= runs reproduce).
+  restart(seed) {
+    if (seed !== undefined) this.seed = seed;
+    this.startRun();
+  }
+
+  enterFloor(floorNum) {
+    const t0 = Date.now();
+    this.floorNum = floorNum;
+    this.floor = generateFloor(floorNum, this.rng, this.seed);
+    this.player.x = this.floor.spawn.x;
+    this.player.y = this.floor.spawn.y;
+    // FR-003: fog state resets fully on every floor.
+    this.visited = new Uint8Array(GRID_SIZE * GRID_SIZE);
+    this.markSeen();
+    this.activateRoomAt(this.player.x, this.player.y);
+    log.info('floor generated', { floor: floorNum, ms: Date.now() - t0, rooms: this.floor.rooms.length });
+  }
+
+  get level() {
+    return this.floorNum; // FR-016: level == floor, display-only
+  }
+
+  get attack() {
+    return playerAttack(this.player);
+  }
+
+  get defense() {
+    return playerDefense(this.player);
+  }
+
+  addLog(message) {
+    this.hudLog.push(message);
+    if (this.hudLog.length > LOG_CAP) this.hudLog.shift();
+  }
+
+  tileAt(x, y) {
+    if (x < 0 || y < 0 || x >= GRID_SIZE || y >= GRID_SIZE) return TILE.WALL;
+    return this.floor.grid[y][x];
+  }
+
+  enemyAt(x, y) {
+    return this.floor.enemies.find((e) => e.alive && e.x === x && e.y === y) || null;
+  }
+
+  itemAt(x, y) {
+    return this.floor.items.find((it) => it.x === x && it.y === y) || null;
+  }
+
+  roomIndexAt(x, y) {
+    return this.floor.rooms.findIndex(
+      (r) => x >= r.x && x < r.x + r.w && y >= r.y && y < r.y + r.h
+    );
+  }
+
+  // --- Fog of war (FR-003, R100) --------------------------------------
+
+  markSeen() {
+    const { x, y } = this.player;
+    for (let dy = -SIGHT_RADIUS; dy <= SIGHT_RADIUS; dy++) {
+      for (let dx = -SIGHT_RADIUS; dx <= SIGHT_RADIUS; dx++) {
+        const tx = x + dx;
+        const ty = y + dy;
+        if (tx >= 0 && ty >= 0 && tx < GRID_SIZE && ty < GRID_SIZE) {
+          this.visited[ty * GRID_SIZE + tx] = 1;
+        }
+      }
+    }
+  }
+
+  // 2 = lit (within sight radius), 1 = dimmed (visited), 0 = hidden.
+  visibility(x, y) {
+    const d = Math.max(Math.abs(x - this.player.x), Math.abs(y - this.player.y));
+    if (d <= SIGHT_RADIUS) return 2;
+    return this.visited[y * GRID_SIZE + x] ? 1 : 0;
+  }
+
+  // --- Player turn ------------------------------------------------------
+
+  // dx/dy in {-1,0,1}; 8-directional (FR-004). Returns true if a turn
+  // was consumed.
+  move(dx, dy) {
+    if (this.state !== 'playing') return false;
+    if (dx === 0 && dy === 0) return false;
+    const nx = this.player.x + dx;
+    const ny = this.player.y + dy;
+    const tile = this.tileAt(nx, ny);
+    if (tile === TILE.WALL) return false; // blocked: no turn, no change
+
+    const enemy = this.enemyAt(nx, ny);
+    if (enemy) {
+      // FR-007: moving into an enemy attacks it; the player stays put.
+      this.attackEnemy(enemy);
+      this.enemyTurn();
+      return true;
+    }
+
+    this.player.x = nx;
+    this.player.y = ny;
+    this.markSeen();
+
+    if (tile === TILE.STAIRS) {
+      // FR-011: immediate descent; enemies do not take a turn.
+      this.descend();
+      return true;
+    }
+
+    const item = this.itemAt(nx, ny);
+    if (item) this.pickUp(item);
+    this.activateRoomAt(nx, ny);
+    this.enemyTurn();
+    return true;
+  }
+
+  attackEnemy(enemy) {
+    const dmg = damage(this.attack, enemy.defense);
+    enemy.hp -= dmg;
+    this.addLog(`You hit ${enemy.type} for ${dmg}.`);
+    if (enemy.hp <= 0) {
+      enemy.alive = false;
+      this.enemiesDefeated++;
+      this.addLog(`${enemy.type} dies.`);
+      // 25% chance to drop a random item on its tile (US2-AS5), unless
+      // the tile already holds an item (FR-025: one item per tile).
+      if (this.rng.chance(DROP_CHANCE) && !this.itemAt(enemy.x, enemy.y)) {
+        const drop = makeRandomItem(this.floorNum, this.rng);
+        drop.x = enemy.x;
+        drop.y = enemy.y;
+        this.floor.items.push(drop);
+        this.addLog(`${enemy.type} drops ${drop.name}.`);
+      }
+      log.info('enemy defeated', { type: enemy.type, total: this.enemiesDefeated });
+    }
+  }
+
+  pickUp(item) {
+    if (this.player.inventory.length >= INVENTORY_CAP) {
+      this.addLog(`Inventory is full — the ${item.name} stays on the floor.`);
+      return false;
+    }
+    this.floor.items.splice(this.floor.items.indexOf(item), 1);
+    delete item.x;
+    delete item.y;
+    this.player.inventory.push(item);
+    this.addLog(`You picked up ${item.name}.`);
+    return true;
+  }
+
+  descend() {
+    if (this.floorNum === MAX_FLOOR) {
+      // R101: stairs on floor 9 trigger victory; no floor 10 generated.
+      this.state = 'victory';
+      log.info('victory', { seed: this.seed, enemiesDefeated: this.enemiesDefeated });
+      return;
+    }
+    this.hasDescended = true;
+    this.enterFloor(this.floorNum + 1);
+    this.addLog(`You descend to floor ${this.floorNum}.`);
+  }
+
+  // R103: room-wide aggro — every enemy in the room the player stands in
+  // activates; activation is permanent.
+  activateRoomAt(x, y) {
+    const idx = this.roomIndexAt(x, y);
+    if (idx === -1) return;
+    for (const e of this.floor.enemies) {
+      if (e.alive && e.roomIndex === idx && !e.activated) e.activated = true;
+    }
+  }
+
+  // --- Enemy turn (FR-022, FR-026, R103) --------------------------------
+
+  enemyTurn() {
+    if (this.state !== 'playing') return;
+    for (const e of this.floor.enemies) {
+      if (!e.alive) continue;
+      if (e.activated) {
+        const dist = Math.max(Math.abs(e.x - this.player.x), Math.abs(e.y - this.player.y));
+        if (dist <= 1) {
+          // Adjacent (8-dir): attack instead of moving.
+          const dmg = damage(e.attack, this.defense);
+          this.player.hp -= dmg;
+          this.addLog(`${e.type} hits you for ${dmg}.`);
+        } else {
+          this.pursue(e);
+        }
+      } else {
+        this.patrol(e);
+      }
+    }
+    if (this.player.hp <= 0) {
+      this.player.hp = 0;
+      this.state = 'gameover';
+      log.info('game over', {
+        seed: this.seed,
+        floor: this.floorNum,
+        enemiesDefeated: this.enemiesDefeated,
+      });
+    }
+  }
+
+  // A tile an enemy may move onto: in-bounds floor (stairs are
+  // non-walkable for enemies), no other living enemy (iteration-order
+  // collision, FR-026), never the player's tile.
+  enemyWalkable(x, y) {
+    if (this.tileAt(x, y) !== TILE.FLOOR) return false;
+    if (x === this.player.x && y === this.player.y) return false;
+    if (this.enemyAt(x, y)) return false;
+    return true;
+  }
+
+  // Greedy step with wall-sliding: preferred diagonal/cardinal step
+  // toward the player, then primary axis, then secondary axis.
+  pursue(e) {
+    const dx = Math.sign(this.player.x - e.x);
+    const dy = Math.sign(this.player.y - e.y);
+    const xPrimary = Math.abs(this.player.x - e.x) >= Math.abs(this.player.y - e.y);
+    const candidates = [[dx, dy]];
+    if (xPrimary) {
+      candidates.push([dx, 0], [0, dy]);
+    } else {
+      candidates.push([0, dy], [dx, 0]);
+    }
+    for (const [cx, cy] of candidates) {
+      if (cx === 0 && cy === 0) continue;
+      if (this.enemyWalkable(e.x + cx, e.y + cy)) {
+        e.x += cx;
+        e.y += cy;
+        return;
+      }
+    }
+    // No viable move: stay in place.
+  }
+
+  // Idle patrol: one random step to an adjacent walkable tile inside the
+  // spawning room; enemies never leave the room before activation.
+  // Test-dungeon enemies have patrol disabled to preserve FR-039's
+  // deterministic positions.
+  patrol(e) {
+    if (e.patrol === false) return;
+    const room = this.floor.rooms[e.roomIndex];
+    if (!room) return;
+    const options = [];
+    for (let dy = -1; dy <= 1; dy++) {
+      for (let dx = -1; dx <= 1; dx++) {
+        if (dx === 0 && dy === 0) continue;
+        const nx = e.x + dx;
+        const ny = e.y + dy;
+        if (nx < room.x || nx >= room.x + room.w || ny < room.y || ny >= room.y + room.h) continue;
+        if (!this.enemyWalkable(nx, ny)) continue;
+        options.push([nx, ny]);
+      }
+    }
+    if (options.length === 0) return;
+    const [nx, ny] = this.rng.pick(options);
+    e.x = nx;
+    e.y = ny;
+  }
+
+  // --- Inventory (FR-019) ----------------------------------------------
+
+  openInventory() {
+    if (this.state !== 'playing') return;
+    this.state = 'inventory';
+    this.invCursor = 0;
+  }
+
+  closeInventory() {
+    if (this.state !== 'inventory') return;
+    this.state = 'playing';
+  }
+
+  moveInvCursor(delta) {
+    if (this.state !== 'inventory') return;
+    this.invCursor = (this.invCursor + delta + INVENTORY_CAP) % INVENTORY_CAP;
+  }
+
+  // Enter on the selected slot: consume potion / equip weapon or armor.
+  // Equipping is a swap: the previously equipped item (if any) takes the
+  // freed slot, so equipping always succeeds (FR-019).
+  useSelected() {
+    if (this.state !== 'inventory') return;
+    const idx = this.invCursor;
+    const item = this.player.inventory[idx];
+    if (!item) return;
+    if (item.type === 'potion') {
+      const before = this.player.hp;
+      this.player.hp = Math.min(this.player.maxHp, this.player.hp + item.value);
+      this.player.inventory.splice(idx, 1);
+      this.addLog(`You drink ${item.name} and recover ${this.player.hp - before} HP.`);
+    } else if (item.type === 'weapon') {
+      const prev = this.player.weapon;
+      this.player.weapon = item;
+      if (prev) this.player.inventory.splice(idx, 1, prev);
+      else this.player.inventory.splice(idx, 1);
+      this.addLog(`You equip ${item.name}.`);
+    } else if (item.type === 'armor') {
+      const prev = this.player.armor;
+      this.player.armor = item;
+      if (prev) this.player.inventory.splice(idx, 1, prev);
+      else this.player.inventory.splice(idx, 1);
+      this.addLog(`You equip ${item.name}.`);
+    }
+  }
+}
+
+// ===== src/render.js =====
+// DOM/CSS character-grid renderer (Clarification D1; FR-001, FR-012,
+// FR-015, FR-032, FR-033, FR-034, FR-035; R100, R102). Diff-based cell
+// updates keep per-turn work bounded (SC-005, FR-029).
+
+
+function createRenderer(root) {
+  const gridEl = root.querySelector('#grid');
+  const viewportEl = root.querySelector('#viewport');
+  const cells = [];
+  const cache = [];
+
+  // Build the 80x80 grid once: one div per row, one span per cell.
+  for (let y = 0; y < GRID_SIZE; y++) {
+    const row = document.createElement('div');
+    row.className = 'row';
+    for (let x = 0; x < GRID_SIZE; x++) {
+      const cell = document.createElement('span');
+      cell.className = 'cell hid';
+      cell.textContent = ' ';
+      row.appendChild(cell);
+      cells.push(cell);
+      cache.push('hid| ');
+    }
+    gridEl.appendChild(row);
+  }
+
+  const hpEl = root.querySelector('#stat-hp');
+  const atkEl = root.querySelector('#stat-atk');
+  const defEl = root.querySelector('#stat-def');
+  const lvlEl = root.querySelector('#stat-lvl');
+  const floorEl = root.querySelector('#stat-floor');
+  const logEl = root.querySelector('#hud-log');
+  const hintEl = root.querySelector('#hint');
+  const invEl = root.querySelector('#inventory');
+  const invListEl = root.querySelector('#inv-list');
+  const invEquipEl = root.querySelector('#inv-equipped');
+  const overEl = root.querySelector('#gameover');
+  const overStatsEl = root.querySelector('#gameover-stats');
+  const winEl = root.querySelector('#victory');
+  const winStatsEl = root.querySelector('#victory-stats');
+
+  function cellFor(game, x, y) {
+    const vis = game.visibility(x, y);
+    if (vis === 0) return 'hid| '; // hidden: black square, grid preserved
+    const tile = game.tileAt(x, y);
+    if (vis === 1) {
+      // Dimmed: terrain only — no entities (FR-032).
+      return `dim|${tile === TILE.WALL ? '#' : tile === TILE.STAIRS ? '>' : '.'}`;
+    }
+    // Lit: player > enemy > item > terrain.
+    if (x === game.player.x && y === game.player.y) return 'pl|@';
+    const enemy = game.enemyAt(x, y);
+    if (enemy) return `en|${enemy.glyph}`;
+    const item = game.itemAt(x, y);
+    if (item) return `it|${item.glyph}`;
+    if (tile === TILE.STAIRS) return 'st|>';
+    return tile === TILE.WALL ? 'ter|#' : 'ter|.';
+  }
+
+  function render(game) {
+    for (let y = 0; y < GRID_SIZE; y++) {
+      for (let x = 0; x < GRID_SIZE; x++) {
+        const i = y * GRID_SIZE + x;
+        const next = cellFor(game, x, y);
+        if (cache[i] === next) continue;
+        cache[i] = next;
+        const sep = next.indexOf('|');
+        cells[i].className = 'cell ' + next.slice(0, sep);
+        cells[i].textContent = next.slice(sep + 1);
+      }
+    }
+
+    // HUD (FR-005, FR-016).
+    hpEl.textContent = `HP ${game.player.hp}/${game.player.maxHp}`;
+    atkEl.textContent = `ATK ${game.attack}`;
+    defEl.textContent = `DEF ${game.defense}`;
+    lvlEl.textContent = `LVL ${game.level}`;
+    floorEl.textContent = `Floor ${game.floorNum}`;
+
+    // HUD log (FR-018): rolling buffer rendered, scrolled to newest.
+    logEl.textContent = game.hudLog.join('\n');
+    logEl.scrollTop = logEl.scrollHeight;
+
+    // SC-006: hint until first descent.
+    hintEl.style.display = game.hasDescended ? 'none' : '';
+
+    renderInventory(game);
+    renderEndScreens(game);
+    centerOnPlayer(game);
+  }
+
+  function renderInventory(game) {
+    if (game.state !== 'inventory') {
+      invEl.classList.remove('active');
+      return;
+    }
+    invEl.classList.add('active');
+    const w = game.player.weapon;
+    const a = game.player.armor;
+    invEquipEl.textContent =
+      `Weapon: ${w ? w.name : 'none'}   Armor: ${a ? a.name : 'none'}`;
+    let html = '';
+    for (let i = 0; i < 10; i++) {
+      const item = game.player.inventory[i];
+      const sel = i === game.invCursor ? 'sel' : '';
+      const label = item ? `${item.glyph} ${item.name}` : '— empty —';
+      html += `<div class="inv-slot ${sel}">${i === game.invCursor ? '>' : ' '} ${i + 1}. ${label}</div>`;
+    }
+    invListEl.innerHTML = html;
+  }
+
+  function renderEndScreens(game) {
+    // FR-008, R101, FR-038: floor reached, enemies defeated, seed, restart prompt.
+    if (game.state === 'gameover') {
+      overStatsEl.textContent =
+        `Floor reached: ${game.floorNum}  ·  Enemies defeated: ${game.enemiesDefeated}  ·  Seed: ${game.seed}`;
+      overEl.classList.add('active');
+    } else {
+      overEl.classList.remove('active');
+    }
+    if (game.state === 'victory') {
+      winStatsEl.textContent =
+        `Floors conquered: 9  ·  Enemies defeated: ${game.enemiesDefeated}  ·  Seed: ${game.seed}`;
+      winEl.classList.add('active');
+    } else {
+      winEl.classList.remove('active');
+    }
+  }
+
+  // FR-034: keep the player centered in the scrollable viewport.
+  function centerOnPlayer(game) {
+    const cell = cells[game.player.y * GRID_SIZE + game.player.x];
+    const cw = cell.offsetWidth || 16;
+    const ch = cell.offsetHeight || 16;
+    viewportEl.scrollLeft = game.player.x * cw + cw / 2 - viewportEl.clientWidth / 2;
+    viewportEl.scrollTop = game.player.y * ch + ch / 2 - viewportEl.clientHeight / 2;
+  }
+
+  return { render };
+}
+
+// ===== src/input.js =====
+// Keyboard input (FR-004, FR-019, FR-027, FR-030): WASD + arrows,
+// 8-directional. Simultaneously held direction keys combine into one
+// diagonal move; sequential presses each resolve their own turn
+// synchronously, so only the last keypress before a turn resolves ever
+// takes effect.
+
+const DIRS = {
+  w: [0, -1],
+  a: [-1, 0],
+  s: [0, 1],
+  d: [1, 0],
+  arrowup: [0, -1],
+  arrowleft: [-1, 0],
+  arrowdown: [0, 1],
+  arrowright: [1, 0],
+};
+
+function attachInput(target, game, onRestart, onUpdate) {
+  const held = new Set();
+
+  function heldVector() {
+    let dx = 0;
+    let dy = 0;
+    for (const key of held) {
+      const [vx, vy] = DIRS[key];
+      dx += vx;
+      dy += vy;
+    }
+    return [Math.max(-1, Math.min(1, dx)), Math.max(-1, Math.min(1, dy))];
+  }
+
+  target.addEventListener('keydown', (ev) => {
+    const key = ev.key.toLowerCase();
+
+    if (game.state === 'inventory') {
+      if (key === 'escape' || key === 'i') {
+        game.closeInventory();
+      } else if (key === 'arrowup' || key === 'w' || key === 'arrowleft') {
+        game.moveInvCursor(-1);
+      } else if (key === 'arrowdown' || key === 's' || key === 'arrowright') {
+        game.moveInvCursor(1);
+      } else if (key === 'enter') {
+        game.useSelected();
+      } else {
+        return;
+      }
+      ev.preventDefault();
+      onUpdate();
+      return;
+    }
+
+    if (game.state === 'gameover' || game.state === 'victory') {
+      if (key === 'r') {
+        onRestart();
+        onUpdate();
+        ev.preventDefault();
+      }
+      return;
+    }
+
+    if (key === 'i') {
+      game.openInventory();
+      ev.preventDefault();
+      onUpdate();
+      return;
+    }
+
+    if (key in DIRS) {
+      ev.preventDefault();
+      held.add(key);
+      const [dx, dy] = heldVector();
+      game.move(dx, dy);
+      onUpdate();
+    }
+  });
+
+  target.addEventListener('keyup', (ev) => {
+    held.delete(ev.key.toLowerCase());
+  });
+
+  // Losing focus must not leave stale held keys behind.
+  window.addEventListener('blur', () => held.clear());
+}
+
+// ===== src/main.js =====
+// Bootstrap: parse the seed, start the run, wire renderer + input
+// (FR-014, FR-030, FR-038).
+
+
+const bootLog = createLogger('main');
+
+function currentSeed() {
+  const fromUrl = parseSeed(window.location.search);
+  return fromUrl !== null ? fromUrl : Date.now();
+}
+
+function boot() {
+  const seed = currentSeed();
+  const game = new Game(seed);
+  const renderer = createRenderer(document);
+  const viewport = document.querySelector('#viewport');
+
+  // FR-030: the grid container holds focus and answers the keyboard
+  // without a mouse click; a window-level listener backstops focus loss.
+  viewport.setAttribute('tabindex', '0');
+  attachInput(window, game, () => game.restart(currentSeed()), () => renderer.render(game));
+  viewport.focus();
+
+  renderer.render(game);
+  bootLog.info('booted', { seed });
+}
+
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', boot);
+} else {
+  boot();
+}
+
+</script>
+</body>
+</html>
