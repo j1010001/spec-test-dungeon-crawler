@@ -1,0 +1,20 @@
+{
+  "name": "retro-dungeon-crawler",
+  "version": "1.0.0",
+  "description": "Birdseye-view retro dungeon crawler RPG with procedurally-revealed fog-of-war map.",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "build": "node build/inline.mjs",
+    "test:e2e": "npm run build && playwright test",
+    "verify": "npm run test && npm run build && npm run test:e2e"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.47.0",
+    "esbuild": "^0.23.0",
+    "jsdom": "^29.1.1",
+    "vitest": "^2.1.0"
+  }
+}
