@@ -1,0 +1,17 @@
+{
+  "name": "retro-dungeon-crawler",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Birdseye-view retro dungeon crawler RPG. Dev source is ES modules (for vitest); the shipped artifact is a single build-free index.html with all JS inlined in a non-module script block.",
+  "scripts": {
+    "test": "vitest run",
+    "build": "node build.mjs",
+    "test:e2e": "playwright test",
+    "verify": "npm run test && npm run build && npm run test:e2e"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.56.0",
+    "vitest": "^3.0.0"
+  }
+}
