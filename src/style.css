@@ -1,0 +1,169 @@
+/* Retro Dungeon Crawler — R102 limited palette on black, FR-033 layout.   */
+/* Colors: walls/staircase/terrain grey #9e9e9e, fog (dimmed) dark grey    */
+/* #4d4d4d, player white #ffffff, enemies light brown #c49a6c, items light */
+/* blue #8fd0ff, background black. No other foreground colors.             */
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  background: #000000;
+  color: #9e9e9e;
+  font-family: "Courier New", Courier, monospace;
+  overflow: hidden;
+}
+
+#app {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+}
+
+/* Header: compact, max 3 text lines (FR-033). Stats+log left, hint right. */
+#hud {
+  display: flex;
+  flex: 0 0 auto;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 1em;
+  line-height: 1.2em;
+  max-height: 3.6em; /* 3 lines */
+  overflow: hidden;
+  padding: 0 0.5em;
+  font-size: 14px;
+}
+
+#hud-left {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+#stats {
+  color: #ffffff;
+  white-space: nowrap;
+  height: 1.2em;
+  overflow: hidden;
+}
+
+/* FR-018: 50-line rolling buffer retained; only the newest lines that fit
+   the header are shown; older lines reachable by scrolling (no scrollbar). */
+#log {
+  height: 2.4em; /* 2 lines — header total stays ≤ 3 lines */
+  overflow-y: auto;
+  scrollbar-width: none;
+  color: #9e9e9e;
+}
+#log::-webkit-scrollbar {
+  display: none;
+}
+#log div {
+  white-space: nowrap;
+  height: 1.2em;
+}
+
+#hint {
+  flex: 0 0 auto;
+  color: #ffffff;
+  white-space: nowrap;
+}
+#hint[hidden] {
+  display: none;
+}
+
+/* Grid viewport: fills remaining space, scrollable both axes, scrollbars
+   hidden (FR-033/FR-034), horizontally centered, focusable (FR-030). */
+#viewport {
+  flex: 1 1 auto;
+  overflow: auto;
+  scrollbar-width: none;
+  outline: none;
+  display: block;
+  text-align: center;
+}
+#viewport::-webkit-scrollbar {
+  display: none;
+}
+#viewport:focus {
+  box-shadow: inset 0 0 0 1px #4d4d4d; /* visible focus feedback (FR-030) */
+}
+
+/* 2D character grid: rows of fixed-size cells (FR-001/FR-015). */
+#grid {
+  display: inline-block;
+  text-align: left;
+}
+.row {
+  height: 16px;
+  line-height: 16px;
+  white-space: nowrap;
+}
+.t {
+  display: inline-block;
+  width: 12px;
+  height: 16px;
+  font-size: 14px;
+  text-align: center;
+  vertical-align: top;
+  background: #000000;
+}
+
+/* Visibility + entity colors (R102). Hidden tiles are black squares. */
+.t.hid {
+  color: #000000;
+}
+.t.dim {
+  color: #4d4d4d;
+}
+.t.terrain {
+  color: #9e9e9e;
+}
+.t.player {
+  color: #ffffff;
+}
+.t.enemy {
+  color: #c49a6c;
+}
+.t.item {
+  color: #8fd0ff;
+}
+
+/* Full-viewport overlays (FR-035): cover everything when active, fully
+   invisible when inactive. */
+.overlay {
+  position: fixed;
+  inset: 0;
+  background: #000000;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #ffffff;
+  font-size: 16px;
+}
+.overlay[hidden] {
+  display: none;
+}
+.overlay .panel {
+  text-align: left;
+  min-width: 24em;
+}
+.overlay h2 {
+  color: #ffffff;
+  text-align: center;
+}
+.overlay .slot {
+  white-space: pre;
+  color: #9e9e9e;
+}
+.overlay .slot.selected {
+  color: #ffffff;
+}
+.overlay .empty {
+  color: #4d4d4d;
+}
+.overlay .equipped,
+.overlay .help {
+  color: #9e9e9e;
+  margin: 0.6em 0;
+}
