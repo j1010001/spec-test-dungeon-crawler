@@ -1,5 +1,11 @@
 import { describe, it, expect } from 'vitest';
-import { normalizeKey, isDirectionKey, resolveMove, createTurnCoalescer } from '../../src/input.js';
+import {
+  normalizeKey,
+  isDirectionKey,
+  resolveMove,
+  createTurnCoalescer,
+  DIAGONAL_COALESCE_MS,
+} from '../../src/input.js';
 
 describe('keyboard mapping (FR-004: WASD and arrows, 8-directional)', () => {
   it('WASD map to the four cardinal directions', () => {
@@ -56,96 +62,169 @@ describe('simultaneous keys → diagonal; sequential → last wins (FR-027)', ()
   });
 });
 
-// FR-027 regression: keydowns landing within one animation frame must resolve
-// as ONE turn (the review measured a held W+A pair moving the player twice).
-describe('turn coalescer: same-frame keydowns resolve exactly one turn (FR-027)', () => {
-  // Fake requestAnimationFrame: collects callbacks; frame() runs one frame.
-  function fakeScheduler() {
-    const queue = [];
+// FR-027 regression (fix round 2): the FIRST direction press arms a
+// DIAGONAL_COALESCE_MS window — a cross-axis second press inside it resolves
+// ONE combined diagonal turn immediately at the skew (the round-1 per-frame
+// coalescer resolved 4–25ms-skewed pairs as TWO turns); same-axis is
+// last-keypress-wins; the timer expiring resolves the lone cardinal; keyup
+// flushes synchronously. These replace the round-1 frame-based coalescer
+// tests, which asserted the obsolete contract.
+describe('turn coalescer: 30ms first-press window (FR-027)', () => {
+  // Deterministic fake timer: advance(ms) fires due timers in order.
+  function fakeTimers() {
+    let now = 0;
+    let nextId = 1;
+    const armed = new Map(); // id -> { due, cb }
     return {
-      schedule: (cb) => queue.push(cb),
-      frame() {
-        const cbs = queue.splice(0);
-        for (const cb of cbs) cb();
+      set: (cb, ms) => {
+        const id = nextId++;
+        armed.set(id, { due: now + ms, cb });
+        return id;
       },
-      pending: () => queue.length,
+      clear: (id) => armed.delete(id),
+      advance(ms) {
+        now += ms;
+        for (const [id, t] of [...armed]) {
+          if (t.due <= now) {
+            armed.delete(id);
+            t.cb();
+          }
+        }
+      },
+      armedCount: () => armed.size,
     };
   }
 
   function setup() {
-    const s = fakeScheduler();
+    const t = fakeTimers();
     const turns = [];
-    const c = createTurnCoalescer(s.schedule, (key) => turns.push(key));
-    return { s, turns, c };
+    const c = createTurnCoalescer(t, (key) => turns.push(key));
+    return { t, turns, c };
   }
 
-  it('two cross-axis presses in one frame yield a single turn for the newest key', () => {
-    const { s, turns, c } = setup();
-    c.press('w');
-    c.press('a'); // same frame: merges, does NOT queue a second turn
-    expect(turns).toEqual([]); // nothing resolves before the frame
-    s.frame();
-    expect(turns).toEqual(['a']); // newest press wins; held-set makes it diagonal
-    s.frame();
-    expect(turns).toEqual(['a']); // and never a second turn afterwards
+  it('exposes a 30ms named window constant', () => {
+    expect(DIAGONAL_COALESCE_MS).toBe(30);
   });
 
-  it('presses in separate frames resolve as separate turns (sequential input)', () => {
-    const { s, turns, c } = setup();
-    c.press('w');
-    s.frame();
-    c.press('a');
-    s.frame();
+  it('arms the window on the first press: no turn resolves before it elapses', () => {
+    const { t, turns, c } = setup();
+    c.press('w', false);
+    expect(turns).toEqual([]); // does NOT resolve yet
+    expect(t.armedCount()).toBe(1);
+    t.advance(DIAGONAL_COALESCE_MS - 1);
+    expect(turns).toEqual([]); // still inside the window
+  });
+
+  it('timer expiry with no second key resolves the single cardinal move exactly once', () => {
+    const { t, turns, c } = setup();
+    c.press('w', false);
+    t.advance(DIAGONAL_COALESCE_MS);
+    expect(turns).toEqual(['w']);
+    t.advance(500);
+    expect(turns).toEqual(['w']); // never a second turn
+  });
+
+  it('a cross-axis second press inside the window resolves ONE combined turn immediately (latency = the skew)', () => {
+    const { t, turns, c } = setup();
+    c.press('w', false);
+    t.advance(10); // realistic human skew
+    c.press('a', false);
+    expect(turns).toEqual(['a']); // resolved AT the second press, no added wait
+    t.advance(500);
+    expect(turns).toEqual(['a']); // timer was cancelled: no second move
+    expect(t.armedCount()).toBe(0);
+  });
+
+  it('a same-axis second press replaces the pending key (last-keypress-wins), one turn total', () => {
+    const { t, turns, c } = setup();
+    c.press('w', false);
+    t.advance(10);
+    c.press('s', false); // opposite key, same axis
+    expect(turns).toEqual([]); // no immediate resolution
+    t.advance(DIAGONAL_COALESCE_MS);
+    expect(turns).toEqual(['s']); // newest press wins, exactly once
+  });
+
+  it('presses skewed wider than the window resolve as two sequential turns', () => {
+    const { t, turns, c } = setup();
+    c.press('w', false);
+    t.advance(60); // window expired at 30ms
+    c.press('a', false);
+    t.advance(60);
     expect(turns).toEqual(['w', 'a']);
   });
 
-  it('a lone press resolves exactly once on the next frame', () => {
-    const { s, turns, c } = setup();
-    c.press('d');
-    s.frame();
-    s.frame();
-    expect(turns).toEqual(['d']);
+  it('keyup of the pending key resolves the turn synchronously (quick tap, no lost input)', () => {
+    const { t, turns, c } = setup();
+    c.press('d', false);
+    c.release('d'); // released before the timer
+    expect(turns).toEqual(['d']); // resolves NOW, at release
+    t.advance(500);
+    expect(turns).toEqual(['d']); // cancelled timer never double-fires
   });
 
-  it('flush() resolves the pending turn synchronously (keyup path) and the frame callback then no-ops', () => {
-    const { s, turns, c } = setup();
-    c.press('d');
-    c.flush(); // keyup before the frame: turn resolves NOW
-    expect(turns).toEqual(['d']);
-    s.frame(); // scheduled callback still fires...
-    expect(turns).toEqual(['d']); // ...but finds no pending turn
+  it('keyup of a NON-pending key does not flush the window', () => {
+    const { t, turns, c } = setup();
+    c.press('w', false);
+    c.release('a'); // some other key released
+    expect(turns).toEqual([]);
+    t.advance(DIAGONAL_COALESCE_MS);
+    expect(turns).toEqual(['w']); // window ran to expiry as normal
+    c.release('w'); // keyup after resolution: nothing pending
+    expect(turns).toEqual(['w']);
   });
 
-  it('cancel() drops the pending turn (restart/blur)', () => {
-    const { s, turns, c } = setup();
-    c.press('w');
+  it('cancel() drops the pending turn and its timer (restart/blur)', () => {
+    const { t, turns, c } = setup();
+    c.press('w', false);
     c.cancel();
-    s.frame();
+    expect(t.armedCount()).toBe(0);
+    t.advance(500);
+    expect(turns).toEqual([]);
+    c.release('w'); // late keyup after cancel: still nothing
     expect(turns).toEqual([]);
   });
 
-  it('schedules at most one callback per window, and re-arms after it fires', () => {
-    const { s, turns, c } = setup();
-    c.press('w');
-    c.press('s');
-    c.press('d');
-    expect(s.pending()).toBe(1); // one frame callback despite three presses
-    s.frame();
-    expect(turns).toEqual(['d']);
-    c.press('w'); // next window re-arms
-    expect(s.pending()).toBe(1);
-    s.frame();
-    expect(turns).toEqual(['d', 'w']);
+  it('OS auto-repeat inside the pending window does not bypass it or double-move', () => {
+    const { t, turns, c } = setup();
+    c.press('w', false);
+    t.advance(10);
+    c.press('w', true); // repeat of the pending key: same-axis last-wins
+    expect(turns).toEqual([]);
+    t.advance(DIAGONAL_COALESCE_MS);
+    expect(turns).toEqual(['w']); // exactly one move
   });
 
-  it('repeat presses of one held key resolve once per frame, not once per event', () => {
-    const { s, turns, c } = setup();
-    c.press('d');
-    c.press('d'); // OS auto-repeat landing in the same frame
-    s.frame();
+  it('OS auto-repeat with no pending turn is held-key continuation: one move per repeat, immediately', () => {
+    const { t, turns, c } = setup();
+    c.press('d', false);
+    t.advance(DIAGONAL_COALESCE_MS); // first move resolves at the window
     expect(turns).toEqual(['d']);
-    c.press('d'); // next repeat, next frame
-    s.frame();
+    c.press('d', true); // subsequent repeats resolve without a new window
     expect(turns).toEqual(['d', 'd']);
+    c.press('d', true);
+    expect(turns).toEqual(['d', 'd', 'd']);
+    expect(t.armedCount()).toBe(0);
+  });
+
+  it('after a cross-axis resolution, repeats continue diagonally via the held set (one turn each)', () => {
+    const { t, turns, c } = setup();
+    c.press('w', false);
+    t.advance(15);
+    c.press('a', false); // diagonal resolved immediately
+    expect(turns).toEqual(['a']);
+    c.press('a', true); // held-pair continuation: repeats of the newest key
+    c.press('a', true); // (resolveMove combines with held 'w' → diagonal)
+    expect(turns).toEqual(['a', 'a', 'a']);
+  });
+
+  it('a fresh press after resolution re-arms a new window', () => {
+    const { t, turns, c } = setup();
+    c.press('w', false);
+    t.advance(DIAGONAL_COALESCE_MS);
+    c.press('s', false); // next window
+    expect(turns).toEqual(['w']);
+    t.advance(DIAGONAL_COALESCE_MS);
+    expect(turns).toEqual(['w', 's']);
   });
 });

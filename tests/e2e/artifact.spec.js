@@ -134,15 +134,17 @@ test('FR-027 regression: a same-task cross-axis keydown pair is ONE combined dia
   expect(await playerPos(page)).toEqual([40, 40]); // seed-99999 spawn
 
   // Deterministic simultaneity: both keydowns of the pair dispatched
-  // synchronously within one task — no frame boundary can split them.
-  // (The pre-fix build resolved this as TWO turns: (40,40) → (39,38).)
+  // synchronously within one task — 0ms skew. The second (cross-axis) press
+  // lands inside the 30ms coalescing window and resolves the combined
+  // diagonal immediately. (The original build resolved this as TWO turns:
+  // (40,40) → (39,38).)
   await page.evaluate(() => {
     const opts = { bubbles: true, cancelable: true };
     document.dispatchEvent(new KeyboardEvent('keydown', { key: 'w', ...opts }));
     document.dispatchEvent(new KeyboardEvent('keydown', { key: 'a', ...opts }));
   });
 
-  // Wait for the coalesced turn to resolve (next animation frame)...
+  // Wait for the coalesced turn to resolve...
   await page.waitForFunction(() => {
     const el = document.querySelector('.c-player');
     return el && !(Number(el.dataset.x) === 40 && Number(el.dataset.y) === 40);
@@ -179,6 +181,94 @@ test('FR-027 regression: sequential presses stay one-tile-per-press (last keypre
   expect(await playerPos(page)).toEqual([41, 40]);
   await page.keyboard.press('s');
   expect(await playerPos(page)).toEqual([41, 41]);
+
+  expect(errors).toEqual([]);
+});
+
+// ---------------------------------------------------------------------------
+// FR-027 fix round 2: realistic inter-key skew. Humans pressing two keys
+// "simultaneously" skew by 10–50ms; the round-1 per-frame coalescer resolved
+// every skew ≥ ~4ms as TWO turns ((40,40) → (39,38)). The 30ms first-press
+// window must coalesce skews below it into ONE diagonal turn, while skews
+// beyond it stay sequential. Dispatch is deterministic via in-page
+// setTimeout-skewed KeyboardEvents, keydowns only (keys stay "held").
+// ---------------------------------------------------------------------------
+
+// Dispatches keydown W, then keydown A after `skew` ms, then lets every
+// pending window/timer settle (>2x the 30ms window, plus two rAF frames) so
+// any erroneous extra move would have landed before the caller asserts.
+async function skewedPair(page, skew) {
+  await page.evaluate(
+    (ms) =>
+      new Promise((done) => {
+        const opts = { bubbles: true, cancelable: true };
+        document.dispatchEvent(new KeyboardEvent('keydown', { key: 'w', ...opts }));
+        setTimeout(() => {
+          document.dispatchEvent(new KeyboardEvent('keydown', { key: 'a', ...opts }));
+          done();
+        }, ms);
+      }),
+    skew
+  );
+  await page.evaluate(() => new Promise((r) => setTimeout(r, 120)));
+  await page.evaluate(
+    () => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)))
+  );
+}
+
+for (const skew of [5, 15, 25]) {
+  test(`FR-027 regression: a ${skew}ms-skewed cross-axis pair is exactly ONE diagonal turn`, async ({ page }) => {
+    const errors = trackErrors(page);
+    await page.goto(URL);
+    await page.waitForSelector('.c-player');
+    expect(await playerPos(page)).toEqual([40, 40]); // seed-99999 spawn
+
+    await skewedPair(page, skew);
+
+    // Exactly one diagonal step: delta (−1,−1) — NOT (−1,−2), and no second
+    // move lands after the settle wait (2+ frames past both timers).
+    expect(await playerPos(page)).toEqual([39, 39]);
+
+    expect(errors).toEqual([]);
+  });
+}
+
+test('FR-027 regression: a 60ms-skewed pair stays TWO sequential turns (beyond the window)', async ({ page }) => {
+  const errors = trackErrors(page);
+  await page.goto(URL);
+  await page.waitForSelector('.c-player');
+  expect(await playerPos(page)).toEqual([40, 40]);
+
+  await skewedPair(page, 60);
+
+  // W's window expires at 30ms → cardinal (40,39); A at 60ms opens its own
+  // window and, with W still held, resolves diagonally → (39,38). Two turns.
+  expect(await playerPos(page)).toEqual([39, 38]);
+
+  expect(errors).toEqual([]);
+});
+
+test('FR-027 regression: keyup flush — press-and-release of a single key is exactly one move, at release', async ({ page }) => {
+  const errors = trackErrors(page);
+  await page.goto(URL);
+  await page.waitForSelector('.c-player');
+  expect(await playerPos(page)).toEqual([40, 40]);
+
+  // keydown+keyup in one synchronous task: the pending turn must resolve AT
+  // the keyup (no 30ms wait, no lost input) — observable immediately after.
+  await page.evaluate(() => {
+    const opts = { bubbles: true, cancelable: true };
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'd', ...opts }));
+    document.dispatchEvent(new KeyboardEvent('keyup', { key: 'd', ...opts }));
+  });
+  expect(await playerPos(page)).toEqual([41, 40]); // already moved, synchronously
+
+  // And the cancelled window timer never fires a second move.
+  await page.evaluate(() => new Promise((r) => setTimeout(r, 120)));
+  await page.evaluate(
+    () => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)))
+  );
+  expect(await playerPos(page)).toEqual([41, 40]);
 
   expect(errors).toEqual([]);
 });

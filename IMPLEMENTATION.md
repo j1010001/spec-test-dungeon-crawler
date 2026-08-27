@@ -62,3 +62,10 @@ references), so `git status` after a test run reveals a stale committed artifact
 - **Enemy drops** are skipped when the death tile already holds an item
   (one-item-per-tile, FR-025).
 - **Item glyphs**: `!` potion, `/` weapon, `[` armor — all light blue per R102.
+- **FR-027/FR-004 simultaneity window**: "pressed simultaneously" cannot be
+  detected with a 0ms window (human two-key presses skew 10–50ms), so the first
+  direction press opens a 30ms coalescing window (`DIAGONAL_COALESCE_MS`);
+  SC-005's 16ms input-to-render budget is read as the render-pipeline cost
+  after a turn resolves (rendering completes within one frame of resolution) —
+  diagonals resolve at the skew, taps at keyup, and only a lone
+  press-and-hold's first move waits the full 30ms.
