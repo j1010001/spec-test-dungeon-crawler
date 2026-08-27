@@ -126,3 +126,59 @@ test('US6-S5: walking right reaches Room B within 20 keypresses — goblin g and
 
   expect(errors).toEqual([]);
 });
+
+test('FR-027 regression: a same-task cross-axis keydown pair is ONE combined diagonal turn, not two moves', async ({ page }) => {
+  const errors = trackErrors(page);
+  await page.goto(URL);
+  await page.waitForSelector('.c-player');
+  expect(await playerPos(page)).toEqual([40, 40]); // seed-99999 spawn
+
+  // Deterministic simultaneity: both keydowns of the pair dispatched
+  // synchronously within one task — no frame boundary can split them.
+  // (The pre-fix build resolved this as TWO turns: (40,40) → (39,38).)
+  await page.evaluate(() => {
+    const opts = { bubbles: true, cancelable: true };
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'w', ...opts }));
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'a', ...opts }));
+  });
+
+  // Wait for the coalesced turn to resolve (next animation frame)...
+  await page.waitForFunction(() => {
+    const el = document.querySelector('.c-player');
+    return el && !(Number(el.dataset.x) === 40 && Number(el.dataset.y) === 40);
+  });
+  // ...then give any (erroneous) second turn two full frames to land.
+  await page.evaluate(
+    () => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)))
+  );
+
+  // Exactly one diagonal step: delta (−1,−1), NOT (−1,−2)/(−2,−1).
+  expect(await playerPos(page)).toEqual([39, 39]);
+
+  // Releasing the keys triggers no further movement.
+  await page.evaluate(() => {
+    const opts = { bubbles: true, cancelable: true };
+    document.dispatchEvent(new KeyboardEvent('keyup', { key: 'w', ...opts }));
+    document.dispatchEvent(new KeyboardEvent('keyup', { key: 'a', ...opts }));
+  });
+  await page.evaluate(
+    () => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)))
+  );
+  expect(await playerPos(page)).toEqual([39, 39]);
+
+  expect(errors).toEqual([]);
+});
+
+test('FR-027 regression: sequential presses stay one-tile-per-press (last keypress wins)', async ({ page }) => {
+  const errors = trackErrors(page);
+  await page.goto(URL);
+  await page.waitForSelector('.c-player');
+
+  // Two clean sequential presses = two cardinal moves (US6-S3 semantics).
+  await page.keyboard.press('d');
+  expect(await playerPos(page)).toEqual([41, 40]);
+  await page.keyboard.press('s');
+  expect(await playerPos(page)).toEqual([41, 41]);
+
+  expect(errors).toEqual([]);
+});

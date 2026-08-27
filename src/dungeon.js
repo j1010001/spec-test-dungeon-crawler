@@ -223,10 +223,15 @@ function generateProceduralFloor(floor, rng) {
     carveCorridorBetween(tiles, a.x, a.y, b.x, b.y, rng);
   }
 
-  // Spawn room and a DIFFERENT staircase room (FR-024).
+  // Spawn room and a DIFFERENT staircase room (FR-024). The rejection loop is
+  // bounded: after 100 attempts (astronomically unlikely with >=2 rooms) fall
+  // back to a deterministic different room rather than spinning forever.
   const spawnRoom = rng.int(0, rooms.length - 1);
   let stairsRoom = spawnRoom;
-  while (stairsRoom === spawnRoom) stairsRoom = rng.int(0, rooms.length - 1);
+  for (let attempts = 0; stairsRoom === spawnRoom && attempts < 100; attempts++) {
+    stairsRoom = rng.int(0, rooms.length - 1);
+  }
+  if (stairsRoom === spawnRoom) stairsRoom = (spawnRoom + 1) % rooms.length;
   const spawn = roomCenter(rooms[spawnRoom]);
   const sr = rooms[stairsRoom];
   const stairs = {

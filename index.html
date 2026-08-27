@@ -7,14 +7,16 @@
   html, body { margin: 0; height: 100%; background: #000; overflow: hidden; }
   body { font: 14px/18px "Courier New", Courier, monospace; color: #9e9e9e; }
   #app { display: flex; flex-direction: column; height: 100%; }
-  /* Header: max 3 lines (54px), stats+log left, controls hint right (FR-033) */
+  /* Header: max 3 lines (54px), stats+log left, controls hint right (FR-033).
+     Spacing between the two columns uses a margin, not flex gap — flex gap
+     needs Safari 14.1+ and FR-014 targets Safari 14+. */
   #hud { flex: 0 0 auto; max-height: 54px; height: 54px; display: flex;
-         justify-content: space-between; gap: 16px; padding: 0 8px; overflow: hidden; }
+         justify-content: space-between; padding: 0 8px; overflow: hidden; }
   #hud-left { overflow: hidden; min-width: 0; }
-  #stats { white-space: nowrap; color: #d0d0d0; }
+  #stats { white-space: nowrap; color: #9e9e9e; }
   #log { height: 36px; overflow-y: auto; scrollbar-width: none; white-space: pre; color: #9e9e9e; }
   #log::-webkit-scrollbar { display: none; }
-  #hud-right { white-space: nowrap; color: #9e9e9e; }
+  #hud-right { white-space: nowrap; color: #9e9e9e; margin-left: 16px; }
   /* Grid viewport: fills the rest, centered, scrollable without visible
      scrollbars (FR-033/FR-034) */
   #viewport { flex: 1 1 auto; overflow: auto; scrollbar-width: none; }
@@ -32,8 +34,12 @@
   .c-player { color: #ffffff; }
   .c-enemy { color: #c9975b; }
   .c-item { color: #8fd0ff; }
-  /* Full-viewport overlays, invisible when inactive (FR-035) */
-  .overlay { position: fixed; inset: 0; background: #000; color: #d0d0d0;
+  /* Full-viewport overlays, invisible when inactive (FR-035). Offsets use the
+     four longhands, NOT the "inset" shorthand: inset needs Safari 14.1+ and
+     FR-014 targets Safari 14+, where an ignored shorthand would collapse the
+     overlay off-viewport. Overlay text is the wall grey (R102 palette). */
+  .overlay { position: fixed; top: 0; right: 0; bottom: 0; left: 0;
+             background: #000; color: #9e9e9e;
              display: none; padding: 48px; white-space: pre; z-index: 10;
              font: 16px/24px "Courier New", Courier, monospace; }
   .overlay.open { display: block; }
@@ -226,6 +232,47 @@ function resolveMove(key, held) {
     if (other[1] !== 0 && dy === 0) dy = other[1];
   }
   return [dx, dy];
+}
+
+// Turn coalescer (FR-027): direction keydowns landing within one scheduling
+// window (one animation frame in the browser) merge into a SINGLE turn instead
+// of resolving as sequential presses. The newest key of the window wins as the
+// primary direction (last-keypress-wins); cross-axis combination with the held
+// set happens later in resolveTurn via resolveMove, so a near-simultaneous
+// two-key press produces exactly one diagonal move and ONE enemy response.
+//
+// `schedule(cb)` defers cb (requestAnimationFrame in production, a fake in
+// unit tests); `resolveTurn(key)` executes the coalesced turn.
+function createTurnCoalescer(schedule, resolveTurn) {
+  let pendingKey = null;
+  let scheduled = false;
+
+  // Resolves the pending turn NOW. Called by the scheduler, and synchronously
+  // from keyup so a completed press never waits on the next frame (SC-005).
+  function flush() {
+    const key = pendingKey;
+    pendingKey = null;
+    if (key !== null) resolveTurn(key);
+  }
+
+  return {
+    press(key) {
+      pendingKey = key; // newest press of the window wins (FR-027)
+      if (!scheduled) {
+        scheduled = true;
+        schedule(() => {
+          scheduled = false;
+          flush();
+        });
+      }
+    },
+    flush,
+    // Drops any pending turn (restart, focus loss). A still-scheduled callback
+    // then flushes a null key and does nothing.
+    cancel() {
+      pendingKey = null;
+    },
+  };
 }
 
 // ===== src/dungeon.js =====
@@ -446,10 +493,15 @@ function generateProceduralFloor(floor, rng) {
     carveCorridorBetween(tiles, a.x, a.y, b.x, b.y, rng);
   }
 
-  // Spawn room and a DIFFERENT staircase room (FR-024).
+  // Spawn room and a DIFFERENT staircase room (FR-024). The rejection loop is
+  // bounded: after 100 attempts (astronomically unlikely with >=2 rooms) fall
+  // back to a deterministic different room rather than spinning forever.
   const spawnRoom = rng.int(0, rooms.length - 1);
   let stairsRoom = spawnRoom;
-  while (stairsRoom === spawnRoom) stairsRoom = rng.int(0, rooms.length - 1);
+  for (let attempts = 0; stairsRoom === spawnRoom && attempts < 100; attempts++) {
+    stairsRoom = rng.int(0, rooms.length - 1);
+  }
+  if (stairsRoom === spawnRoom) stairsRoom = (spawnRoom + 1) % rooms.length;
   const spawn = roomCenter(rooms[spawnRoom]);
   const sr = rooms[stairsRoom];
   const stairs = {
@@ -994,6 +1046,24 @@ function startGame(win) {
   const ui = createUI(doc, () => game);
   const held = new Set();
 
+  // FR-027: direction keydowns arriving within the same animation frame merge
+  // into ONE turn (near-simultaneous cross-axis presses = one diagonal move,
+  // enemies respond once). Resolution runs inside requestAnimationFrame —
+  // before the frame's paint — so input-to-render latency stays within the
+  // 16ms frame budget (SC-005); keyup flushes synchronously, so a completed
+  // press never waits even that long.
+  const turns = createTurnCoalescer(
+    (cb) => win.requestAnimationFrame(cb),
+    (key) => {
+      if (ui.isInventoryOpen() || game.status !== 'playing') return;
+      const move = resolveMove(key, held);
+      if (move) {
+        movePlayer(game, move[0], move[1]);
+        ui.render();
+      }
+    }
+  );
+
   logger.info('boot', `game booted, seed ${game.seed}`);
 
   doc.addEventListener('keydown', (e) => {
@@ -1022,6 +1092,7 @@ function startGame(win) {
         logger.info('game', 'run restarted');
         game = newRun();
         held.clear();
+        turns.cancel();
         ui.resetCache();
         ui.focusGrid();
       }
@@ -1037,18 +1108,21 @@ function startGame(win) {
     if (isDirectionKey(key)) {
       e.preventDefault(); // keep arrows from scrolling the page
       if (!e.repeat) held.add(key);
-      const move = resolveMove(key, held);
-      if (move) {
-        movePlayer(game, move[0], move[1]);
-        ui.render();
-      }
+      turns.press(key); // coalesced: resolves once per frame (FR-027)
     }
   });
 
   doc.addEventListener('keyup', (e) => {
-    held.delete(normalizeKey(e.key));
+    const key = normalizeKey(e.key);
+    // Resolve any pending turn BEFORE the key leaves the held set, so a fast
+    // press-and-release still combines exactly as it was physically held.
+    if (isDirectionKey(key)) turns.flush();
+    held.delete(key);
   });
-  win.addEventListener('blur', () => held.clear());
+  win.addEventListener('blur', () => {
+    held.clear();
+    turns.cancel();
+  });
 
   ui.render();
   ui.focusGrid();

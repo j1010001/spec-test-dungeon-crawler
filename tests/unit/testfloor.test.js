@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { GRID_W, TILE_FLOOR, TILE_STAIRS, TEST_SEED } from '../../src/constants.js';
+import { GRID_W, GRID_H, TILE_FLOOR, TILE_STAIRS, TEST_SEED } from '../../src/constants.js';
 import { createRng } from '../../src/rng.js';
 import { generateFloor, tileIndex, roomContains, roomAt, chebyshev } from '../../src/dungeon.js';
 
@@ -143,7 +143,7 @@ describe('seed 99999 deterministic test dungeon — floor 1 (FR-039, US5)', () =
 
   it('every walkable tile belongs to one of the 4 rooms or 3 corridors (no extra geometry)', () => {
     const regions = [...d.rooms, ...d.corridors];
-    for (let y = 0; y < GRID_W; y++) {
+    for (let y = 0; y < GRID_H; y++) {
       for (let x = 0; x < GRID_W; x++) {
         const t = d.tiles[tileIndex(x, y)];
         if (t === TILE_FLOOR || t === TILE_STAIRS) {

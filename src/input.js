@@ -35,3 +35,44 @@ export function resolveMove(key, held) {
   }
   return [dx, dy];
 }
+
+// Turn coalescer (FR-027): direction keydowns landing within one scheduling
+// window (one animation frame in the browser) merge into a SINGLE turn instead
+// of resolving as sequential presses. The newest key of the window wins as the
+// primary direction (last-keypress-wins); cross-axis combination with the held
+// set happens later in resolveTurn via resolveMove, so a near-simultaneous
+// two-key press produces exactly one diagonal move and ONE enemy response.
+//
+// `schedule(cb)` defers cb (requestAnimationFrame in production, a fake in
+// unit tests); `resolveTurn(key)` executes the coalesced turn.
+export function createTurnCoalescer(schedule, resolveTurn) {
+  let pendingKey = null;
+  let scheduled = false;
+
+  // Resolves the pending turn NOW. Called by the scheduler, and synchronously
+  // from keyup so a completed press never waits on the next frame (SC-005).
+  function flush() {
+    const key = pendingKey;
+    pendingKey = null;
+    if (key !== null) resolveTurn(key);
+  }
+
+  return {
+    press(key) {
+      pendingKey = key; // newest press of the window wins (FR-027)
+      if (!scheduled) {
+        scheduled = true;
+        schedule(() => {
+          scheduled = false;
+          flush();
+        });
+      }
+    },
+    flush,
+    // Drops any pending turn (restart, focus loss). A still-scheduled callback
+    // then flushes a null key and does nothing.
+    cancel() {
+      pendingKey = null;
+    },
+  };
+}

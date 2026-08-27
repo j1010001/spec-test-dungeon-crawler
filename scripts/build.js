@@ -3,7 +3,9 @@
 // concatenates the dev ES modules into ONE non-module inline <script> block
 // inside a single root index.html, launchable via file:// with no tooling.
 //
-// Usage: node scripts/build.js   (then commit the regenerated index.html)
+// Usage: node scripts/build.js [outFile]   (default: <repo root>/index.html —
+// then commit the regenerated index.html; tests pass a temp outFile so the
+// working tree is never mutated by the suite)
 import { readFileSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
@@ -49,14 +51,16 @@ const CSS = `
   html, body { margin: 0; height: 100%; background: #000; overflow: hidden; }
   body { font: 14px/18px "Courier New", Courier, monospace; color: #9e9e9e; }
   #app { display: flex; flex-direction: column; height: 100%; }
-  /* Header: max 3 lines (54px), stats+log left, controls hint right (FR-033) */
+  /* Header: max 3 lines (54px), stats+log left, controls hint right (FR-033).
+     Spacing between the two columns uses a margin, not flex gap — flex gap
+     needs Safari 14.1+ and FR-014 targets Safari 14+. */
   #hud { flex: 0 0 auto; max-height: 54px; height: 54px; display: flex;
-         justify-content: space-between; gap: 16px; padding: 0 8px; overflow: hidden; }
+         justify-content: space-between; padding: 0 8px; overflow: hidden; }
   #hud-left { overflow: hidden; min-width: 0; }
-  #stats { white-space: nowrap; color: #d0d0d0; }
+  #stats { white-space: nowrap; color: #9e9e9e; }
   #log { height: 36px; overflow-y: auto; scrollbar-width: none; white-space: pre; color: #9e9e9e; }
   #log::-webkit-scrollbar { display: none; }
-  #hud-right { white-space: nowrap; color: #9e9e9e; }
+  #hud-right { white-space: nowrap; color: #9e9e9e; margin-left: 16px; }
   /* Grid viewport: fills the rest, centered, scrollable without visible
      scrollbars (FR-033/FR-034) */
   #viewport { flex: 1 1 auto; overflow: auto; scrollbar-width: none; }
@@ -74,8 +78,12 @@ const CSS = `
   .c-player { color: #ffffff; }
   .c-enemy { color: #c9975b; }
   .c-item { color: #8fd0ff; }
-  /* Full-viewport overlays, invisible when inactive (FR-035) */
-  .overlay { position: fixed; inset: 0; background: #000; color: #d0d0d0;
+  /* Full-viewport overlays, invisible when inactive (FR-035). Offsets use the
+     four longhands, NOT the "inset" shorthand: inset needs Safari 14.1+ and
+     FR-014 targets Safari 14+, where an ignored shorthand would collapse the
+     overlay off-viewport. Overlay text is the wall grey (R102 palette). */
+  .overlay { position: fixed; top: 0; right: 0; bottom: 0; left: 0;
+             background: #000; color: #9e9e9e;
              display: none; padding: 48px; white-space: pre; z-index: 10;
              font: 16px/24px "Courier New", Courier, monospace; }
   .overlay.open { display: block; }
@@ -101,5 +109,8 @@ startGame(window);
 </html>
 `;
 
-writeFileSync(path.join(root, 'index.html'), html);
-console.log(`build: wrote index.html (${html.length} bytes) from ${MODULES.length} modules`);
+const outFile = process.argv[2]
+  ? path.resolve(process.argv[2])
+  : path.join(root, 'index.html');
+writeFileSync(outFile, html);
+console.log(`build: wrote ${outFile} (${html.length} bytes) from ${MODULES.length} modules`);

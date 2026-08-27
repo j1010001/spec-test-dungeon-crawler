@@ -4,7 +4,7 @@ import { parseSeedParam } from './rng.js';
 import { createGame, movePlayer, useInventoryItem } from './game.js';
 import { createUI } from './render.js';
 import { createLogger } from './logger.js';
-import { normalizeKey, isDirectionKey, resolveMove } from './input.js';
+import { normalizeKey, isDirectionKey, resolveMove, createTurnCoalescer } from './input.js';
 
 export function startGame(win) {
   const doc = win.document;
@@ -18,6 +18,24 @@ export function startGame(win) {
   let game = newRun();
   const ui = createUI(doc, () => game);
   const held = new Set();
+
+  // FR-027: direction keydowns arriving within the same animation frame merge
+  // into ONE turn (near-simultaneous cross-axis presses = one diagonal move,
+  // enemies respond once). Resolution runs inside requestAnimationFrame —
+  // before the frame's paint — so input-to-render latency stays within the
+  // 16ms frame budget (SC-005); keyup flushes synchronously, so a completed
+  // press never waits even that long.
+  const turns = createTurnCoalescer(
+    (cb) => win.requestAnimationFrame(cb),
+    (key) => {
+      if (ui.isInventoryOpen() || game.status !== 'playing') return;
+      const move = resolveMove(key, held);
+      if (move) {
+        movePlayer(game, move[0], move[1]);
+        ui.render();
+      }
+    }
+  );
 
   logger.info('boot', `game booted, seed ${game.seed}`);
 
@@ -47,6 +65,7 @@ export function startGame(win) {
         logger.info('game', 'run restarted');
         game = newRun();
         held.clear();
+        turns.cancel();
         ui.resetCache();
         ui.focusGrid();
       }
@@ -62,18 +81,21 @@ export function startGame(win) {
     if (isDirectionKey(key)) {
       e.preventDefault(); // keep arrows from scrolling the page
       if (!e.repeat) held.add(key);
-      const move = resolveMove(key, held);
-      if (move) {
-        movePlayer(game, move[0], move[1]);
-        ui.render();
-      }
+      turns.press(key); // coalesced: resolves once per frame (FR-027)
     }
   });
 
   doc.addEventListener('keyup', (e) => {
-    held.delete(normalizeKey(e.key));
+    const key = normalizeKey(e.key);
+    // Resolve any pending turn BEFORE the key leaves the held set, so a fast
+    // press-and-release still combines exactly as it was physically held.
+    if (isDirectionKey(key)) turns.flush();
+    held.delete(key);
   });
-  win.addEventListener('blur', () => held.clear());
+  win.addEventListener('blur', () => {
+    held.clear();
+    turns.cancel();
+  });
 
   ui.render();
   ui.focusGrid();
