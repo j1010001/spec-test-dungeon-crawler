@@ -1,0 +1,17 @@
+{
+  "name": "retro-dungeon-crawler",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Retro birdseye-view dungeon crawler RPG — spec/001-retro-dungeon-crawler",
+  "scripts": {
+    "test": "vitest run --config vitest.config.mjs",
+    "test:integration": "vitest run --config vitest.integration.config.mjs",
+    "build": "node tools/build.mjs"
+  },
+  "devDependencies": {
+    "jsdom": "^29.1.1",
+    "playwright": "^1.62.1",
+    "vitest": "^4.1.11"
+  }
+}
