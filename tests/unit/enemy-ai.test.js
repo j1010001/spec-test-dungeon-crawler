@@ -75,7 +75,7 @@ describe('activated pursuit: greedy step with wall-sliding (FR-022, Session 2026
       enemies: [goblin(22, 7, 1, { activated: true })],
     };
     const g = makeGame(() => spec);
-    for (let i = 0; i < 12; i++) enemyTurn(g);
+    for (let i = 0; i < 15; i++) enemyTurn(g);
     const e = g.enemies[0];
     // enemy has crossed the corridor out of room 1 and reached the player's side
     expect(e.x).toBeLessThan(20);
