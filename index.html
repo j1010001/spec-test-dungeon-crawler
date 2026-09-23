@@ -1,0 +1,904 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Retro Dungeon Crawler</title>
+<style>
+  html, body {
+    margin: 0; padding: 0; height: 100%;
+    background: #000; color: #9a9a9a;
+    font-family: "Courier New", Courier, monospace;
+    overflow: hidden;
+  }
+  #app { display: flex; flex-direction: column; height: 100vh; }
+
+  /* Header: never taller than 3 lines (FR-033) */
+  #header {
+    flex: 0 0 auto; display: flex; gap: 16px;
+    height: 48px; max-height: 48px; line-height: 16px; font-size: 13px;
+    padding: 0 8px; overflow: hidden; border-bottom: 1px solid #4a4a4a;
+  }
+  #hud-left { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; }
+  #stats { height: 16px; white-space: nowrap; overflow: hidden; color: #ffffff; }
+  #log {
+    height: 32px; overflow-y: auto; white-space: nowrap;
+    scrollbar-width: none; -ms-overflow-style: none;
+  }
+  #log::-webkit-scrollbar { display: none; }
+  #hint { flex: 0 1 auto; max-width: 45%; text-align: right; overflow: hidden; }
+  #hint.hidden { display: none; }
+
+  /* Dungeon: fills the rest of the viewport, scrollable, no visible scrollbars */
+  #dungeon {
+    flex: 1 1 auto; min-height: 0; overflow: auto; outline: none;
+    scrollbar-width: none; -ms-overflow-style: none;
+    box-shadow: inset 0 0 0 1px #000;
+  }
+  #dungeon:focus { box-shadow: inset 0 0 0 1px #4a4a4a; }
+  #dungeon::-webkit-scrollbar { display: none; }
+  #grid {
+    display: grid; grid-template-columns: repeat(80, 16px); grid-auto-rows: 16px;
+    width: 1280px; margin: 0 auto; background: #000;
+  }
+  #grid span {
+    display: block; width: 16px; height: 16px; line-height: 16px;
+    font-size: 15px; text-align: center; overflow: hidden;
+  }
+  /* Limited palette (R102) */
+  #grid .h { color: #000; background: #000; }   /* hidden: black square */
+  #grid .g { color: #9a9a9a; }                  /* lit terrain: walls, floor, stairs */
+  #grid .d { color: #4a4a4a; }                  /* dimmed (seen, out of sight) */
+  #grid .p { color: #ffffff; font-weight: bold; }
+  #grid .e { color: #c8a26e; font-weight: bold; }
+  #grid .i { color: #8ecfff; font-weight: bold; }
+
+  /* Full-viewport overlays (FR-035) */
+  .overlay {
+    position: fixed; top: 0; left: 0; right: 0; bottom: 0; z-index: 10;
+    background: #000; display: none;
+    flex-direction: column; align-items: center; justify-content: center;
+    font-size: 16px; line-height: 22px;
+  }
+  .overlay.active { display: flex; }
+  .overlay h1 { color: #ffffff; font-size: 28px; margin: 0 0 16px 0; letter-spacing: 4px; }
+  .overlay .prompt { color: #ffffff; margin-top: 20px; }
+  #inv-list { list-style: none; padding: 0; margin: 8px 0; min-width: 420px; }
+  #inv-list li { padding: 0 8px; white-space: pre; }
+  #inv-list li.sel { color: #ffffff; background: #4a4a4a; }
+  #inv-list .it { color: #8ecfff; }
+  #inv-equipped { margin-bottom: 8px; }
+  #inv-equipped .it { color: #8ecfff; }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="header">
+    <div id="hud-left">
+      <div id="stats">
+        HP <span id="hp">20</span>/<span id="maxhp">20</span> ·
+        ATK <span id="atk">5</span> ·
+        DEF <span id="def">1</span> ·
+        Level <span id="level">1</span> ·
+        Floor <span id="floor">1</span> ·
+        Kills <span id="kills">0</span>
+      </div>
+      <div id="log" aria-live="polite"></div>
+    </div>
+    <div id="hint">WASD/Arrows to move · I for inventory · Reach &gt; to descend</div>
+  </div>
+  <div id="dungeon" tabindex="0" aria-label="Dungeon map">
+    <div id="grid"></div>
+  </div>
+</div>
+
+<div id="inventory" class="overlay" role="dialog" aria-label="Inventory">
+  <h1>INVENTORY</h1>
+  <div id="inv-equipped"></div>
+  <ul id="inv-list"></ul>
+  <div class="prompt">↑/↓ select · Enter use/equip · Esc close</div>
+</div>
+
+<div id="gameover" class="overlay" role="dialog" aria-label="Game over">
+  <h1>GAME OVER</h1>
+  <div>You were slain on floor <span id="go-floor">1</span>.</div>
+  <div>Enemies defeated: <span id="go-kills">0</span></div>
+  <div>Seed: <span id="go-seed"></span></div>
+  <div class="prompt">Press R to restart</div>
+</div>
+
+<div id="victory" class="overlay" role="dialog" aria-label="Victory">
+  <h1>VICTORY!</h1>
+  <div>You escaped the dungeon from floor <span id="vi-floor">9</span>.</div>
+  <div>Enemies defeated: <span id="vi-kills">0</span></div>
+  <div>Seed: <span id="vi-seed"></span></div>
+  <div class="prompt">Press R to restart</div>
+</div>
+
+<script>
+(function () {
+  'use strict';
+
+  // ---------------------------------------------------------------------
+  // Constants
+  // ---------------------------------------------------------------------
+  var W = 80, H = 80;
+  var SIGHT = 5;
+  var INV_MAX = 10;
+  var LOG_MAX = 50;
+  var MAX_FLOOR = 9;
+  var TEST_SEED = 99999;
+  var CELL = 16;
+  var DIAGONAL_WINDOW_MS = 60;
+
+  var T_EMPTY = 0, T_WALL = 1, T_FLOOR = 2, T_STAIRS = 3;
+  var TILE_GLYPH = ['', '#', '.', '>'];
+
+  var ENEMY_TYPES = [
+    { name: 'Goblin', glyph: 'g', minFloor: 1, maxFloor: 3 },
+    { name: 'Orc', glyph: 'o', minFloor: 4, maxFloor: 6 },
+    { name: 'Wraith', glyph: 'w', minFloor: 7, maxFloor: 9 }
+  ];
+  var WEAPON_NAMES = ['Dagger', 'Short Sword', 'Mace', 'Battle Axe', 'Longsword',
+    'War Hammer', 'Greatsword', 'Runeblade', 'Doomblade'];
+  var ARMOR_NAMES = ['Leather Armor', 'Studded Leather', 'Ring Mail', 'Scale Mail',
+    'Chain Mail', 'Splint Mail', 'Plate Mail', 'Mithril Mail', 'Dragon Plate'];
+  var ITEM_TYPES = ['potion', 'weapon', 'armor'];
+  var ITEM_GLYPH = { potion: '!', weapon: '/', armor: '[' };
+
+  // ---------------------------------------------------------------------
+  // Structured developer logging (FR-037) — DevTools only
+  // ---------------------------------------------------------------------
+  function devLog(level, component, message, data) {
+    var ev = { timestamp: new Date().toISOString(), level: level, component: component, message: message };
+    if (data !== undefined) ev.data = data;
+    var fn = level === 'error' ? console.error : level === 'warn' ? console.warn : console.info;
+    fn.call(console, '[dungeon] ' + JSON.stringify(ev));
+  }
+
+  // ---------------------------------------------------------------------
+  // Seeded RNG (mulberry32)
+  // ---------------------------------------------------------------------
+  function makeRng(seed) {
+    var a = seed >>> 0;
+    function next() {
+      a = (a + 0x6D2B79F5) >>> 0;
+      var t = a;
+      t = Math.imul(t ^ (t >>> 15), t | 1);
+      t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    }
+    return {
+      next: next,
+      int: function (lo, hi) { return lo + Math.floor(next() * (hi - lo + 1)); },
+      pick: function (arr) { return arr[Math.floor(next() * arr.length)]; }
+    };
+  }
+
+  function parseSeedParam() {
+    var raw = null;
+    try { raw = new URLSearchParams(window.location.search).get('seed'); } catch (e) { raw = null; }
+    if (raw !== null) {
+      var n = parseInt(raw, 10);
+      if (!isNaN(n)) return n;
+      devLog('warn', 'seed', 'Invalid seed parameter, falling back to auto seed', { raw: raw });
+    }
+    return null;
+  }
+
+  // ---------------------------------------------------------------------
+  // Helpers
+  // ---------------------------------------------------------------------
+  function idx(x, y) { return y * W + x; }
+  function inBounds(x, y) { return x >= 0 && y >= 0 && x < W && y < H; }
+  function cheb(ax, ay, bx, by) { return Math.max(Math.abs(ax - bx), Math.abs(ay - by)); }
+  function sign(v) { return v > 0 ? 1 : v < 0 ? -1 : 0; }
+  function inRect(r, x, y) { return x >= r.x && y >= r.y && x < r.x + r.w && y < r.y + r.h; }
+  function roomCenter(r) { return { x: r.x + Math.floor(r.w / 2), y: r.y + Math.floor(r.h / 2) }; }
+
+  // ---------------------------------------------------------------------
+  // Entities
+  // ---------------------------------------------------------------------
+  function enemyTypeForFloor(floorNum) {
+    for (var i = 0; i < ENEMY_TYPES.length; i++) {
+      if (floorNum >= ENEMY_TYPES[i].minFloor && floorNum <= ENEMY_TYPES[i].maxFloor) return ENEMY_TYPES[i];
+    }
+    return ENEMY_TYPES[ENEMY_TYPES.length - 1];
+  }
+
+  function makeEnemy(floorNum, x, y, roomIndex, patrol) {
+    var t = enemyTypeForFloor(floorNum);
+    var hp = 10 + floorNum * 5;
+    return {
+      name: t.name, glyph: t.glyph, x: x, y: y,
+      hp: hp, maxHp: hp, attack: 3 + floorNum * 2, defense: floorNum,
+      room: roomIndex, patrol: patrol, active: false
+    };
+  }
+
+  function makeItem(type, floorNum, rng) {
+    var tier = Math.min(Math.max(floorNum, 1), 9) - 1;
+    if (type === 'potion') return { type: 'potion', name: 'Health Potion', value: 10 + floorNum * 5, glyph: ITEM_GLYPH.potion };
+    if (type === 'weapon') return { type: 'weapon', name: WEAPON_NAMES[tier], value: floorNum + rng.int(0, 2), glyph: ITEM_GLYPH.weapon };
+    return { type: 'armor', name: ARMOR_NAMES[tier], value: floorNum + rng.int(0, 2), glyph: ITEM_GLYPH.armor };
+  }
+
+  function describeItem(it) {
+    if (it.type === 'potion') return it.name + ' (+' + it.value + ' HP)';
+    if (it.type === 'weapon') return it.name + ' (+' + it.value + ' ATK)';
+    return it.name + ' (+' + it.value + ' DEF)';
+  }
+
+  // ---------------------------------------------------------------------
+  // Floor generation
+  // ---------------------------------------------------------------------
+  function newFloor(num) {
+    return {
+      num: num,
+      tiles: new Uint8Array(W * H),
+      seen: new Uint8Array(W * H),
+      rooms: [], enemies: [], items: {},
+      start: null, startRoom: -1, stairs: null, stairsRoom: -1, test: false
+    };
+  }
+
+  function carve(f, x, y, w, h) {
+    for (var yy = y; yy < y + h; yy++) {
+      for (var xx = x; xx < x + w; xx++) {
+        if (inBounds(xx, yy) && f.tiles[idx(xx, yy)] !== T_STAIRS) f.tiles[idx(xx, yy)] = T_FLOOR;
+      }
+    }
+  }
+
+  function buildWalls(f) {
+    for (var y = 0; y < H; y++) {
+      for (var x = 0; x < W; x++) {
+        if (f.tiles[idx(x, y)] !== T_EMPTY) continue;
+        var near = false;
+        for (var dy = -1; dy <= 1 && !near; dy++) {
+          for (var dx = -1; dx <= 1; dx++) {
+            var nx = x + dx, ny = y + dy;
+            if (!inBounds(nx, ny)) continue;
+            var t = f.tiles[idx(nx, ny)];
+            if (t === T_FLOOR || t === T_STAIRS) { near = true; break; }
+          }
+        }
+        if (near) f.tiles[idx(x, y)] = T_WALL;
+      }
+    }
+  }
+
+  function enemyAtIn(f, x, y) {
+    for (var i = 0; i < f.enemies.length; i++) {
+      if (f.enemies[i].x === x && f.enemies[i].y === y) return f.enemies[i];
+    }
+    return null;
+  }
+
+  // Deterministic seed-99999 test dungeon (FR-039 / User Story 5)
+  function generateTestFloor(rng) {
+    var f = newFloor(1);
+    f.test = true;
+    var A = { x: 37, y: 37, w: 7, h: 7 };   // start hub, x 37..43, y 37..43
+    var B = { x: 52, y: 37, w: 7, h: 7 };   // right: 1 Goblin + 11 items
+    var C = { x: 37, y: 52, w: 7, h: 7 };   // down: 3 Goblins
+    var D = { x: 38, y: 24, w: 5, h: 5 };   // up: staircase
+    f.rooms = [A, B, C, D];
+    f.rooms.forEach(function (r) { carve(f, r.x, r.y, r.w, r.h); });
+    carve(f, 44, 39, 8, 3);  // A -> B corridor: x 44..51, 8 long, 3 wide
+    carve(f, 39, 44, 3, 8);  // A -> C corridor: y 44..51
+    carve(f, 39, 29, 3, 8);  // A -> D corridor: y 29..36
+
+    f.startRoom = 0;
+    f.start = { x: 40, y: 40 };
+    f.stairsRoom = 3;
+    f.stairs = { x: 40, y: 26 };              // 2 tiles from D's entrance at (40,28)
+    f.tiles[idx(40, 26)] = T_STAIRS;
+
+    // Patrol areas are kept within 5 tiles of each room's entrance tile and
+    // away from the item tiles, so every enemy is in sight on room entry and
+    // no enemy hides an item glyph before the player arrives.
+    f.enemies.push(makeEnemy(1, 55, 40, 1, { x: 54, y: 39, w: 3, h: 3 }));
+    var cPatrol = { x: 37, y: 53, w: 7, h: 4 };
+    f.enemies.push(makeEnemy(1, 38, 54, 2, cPatrol));
+    f.enemies.push(makeEnemy(1, 40, 55, 2, cPatrol));
+    f.enemies.push(makeEnemy(1, 42, 54, 2, cPatrol));
+
+    var spots = [];
+    for (var x = 52; x <= 57; x++) spots.push({ x: x, y: 37 });
+    for (x = 52; x <= 56; x++) spots.push({ x: x, y: 43 });
+    spots.forEach(function (s, i) {
+      f.items[idx(s.x, s.y)] = makeItem(ITEM_TYPES[i % 3], 1, rng);
+    });
+
+    buildWalls(f);
+    return f;
+  }
+
+  // BSP procedural floor (FR-017, FR-020, FR-024, FR-025, FR-006)
+  function generateBspFloor(num, rng) {
+    var f = newFloor(num);
+    var MIN_LEAF = 10;
+    var MAX_DEPTH = 5;
+
+    function makeRoom(leaf) {
+      var rw = rng.int(4, Math.min(12, leaf.w - 2));
+      var rh = rng.int(4, Math.min(12, leaf.h - 2));
+      var rx = leaf.x + 1 + rng.int(0, leaf.w - 2 - rw);
+      var ry = leaf.y + 1 + rng.int(0, leaf.h - 2 - rh);
+      var r = { x: rx, y: ry, w: rw, h: rh };
+      f.rooms.push(r);
+      carve(f, rx, ry, rw, rh);
+      return r;
+    }
+
+    function corridor(a, b) {
+      var ca = roomCenter(a), cb = roomCenter(b);
+      function hline(x1, x2, y) { carve(f, Math.min(x1, x2), y, Math.abs(x2 - x1) + 1, 1); }
+      function vline(y1, y2, x) { carve(f, x, Math.min(y1, y2), 1, Math.abs(y2 - y1) + 1); }
+      if (rng.next() < 0.5) { hline(ca.x, cb.x, ca.y); vline(ca.y, cb.y, cb.x); }
+      else { vline(ca.y, cb.y, ca.x); hline(ca.x, cb.x, cb.y); }
+    }
+
+    // Returns the list of rooms in this subtree; siblings are connected on the way up,
+    // so every room is connected by construction (FR-013).
+    function split(node, depth) {
+      var canH = node.h >= MIN_LEAF * 2;
+      var canV = node.w >= MIN_LEAF * 2;
+      if (depth >= MAX_DEPTH || (!canH && !canV) || (depth >= 3 && rng.next() < 0.2)) {
+        return [makeRoom(node)];
+      }
+      var horiz;
+      if (canH && canV) horiz = node.h > node.w ? true : node.w > node.h ? false : rng.next() < 0.5;
+      else horiz = canH;
+      var a, b, cut;
+      if (horiz) {
+        cut = rng.int(MIN_LEAF, node.h - MIN_LEAF);
+        a = { x: node.x, y: node.y, w: node.w, h: cut };
+        b = { x: node.x, y: node.y + cut, w: node.w, h: node.h - cut };
+      } else {
+        cut = rng.int(MIN_LEAF, node.w - MIN_LEAF);
+        a = { x: node.x, y: node.y, w: cut, h: node.h };
+        b = { x: node.x + cut, y: node.y, w: node.w - cut, h: node.h };
+      }
+      var ra = split(a, depth + 1);
+      var rb = split(b, depth + 1);
+      corridor(rng.pick(ra), rng.pick(rb));
+      return ra.concat(rb);
+    }
+
+    split({ x: 1, y: 1, w: W - 2, h: H - 2 }, 0);
+
+    // Start and stairs rooms must differ.
+    f.startRoom = rng.int(0, f.rooms.length - 1);
+    do { f.stairsRoom = rng.int(0, f.rooms.length - 1); } while (f.stairsRoom === f.startRoom);
+    f.start = roomCenter(f.rooms[f.startRoom]);
+    var sr = f.rooms[f.stairsRoom];
+    f.stairs = { x: sr.x + rng.int(0, sr.w - 1), y: sr.y + rng.int(0, sr.h - 1) };
+    f.tiles[idx(f.stairs.x, f.stairs.y)] = T_STAIRS;
+
+    // Enemies: 1-3 per non-start room.
+    f.rooms.forEach(function (r, ri) {
+      if (ri === f.startRoom) return;
+      var count = rng.int(1, 3);
+      for (var k = 0; k < count; k++) {
+        for (var attempt = 0; attempt < 20; attempt++) {
+          var x = r.x + rng.int(0, r.w - 1), y = r.y + rng.int(0, r.h - 1);
+          if (f.tiles[idx(x, y)] !== T_FLOOR || enemyAtIn(f, x, y)) continue;
+          f.enemies.push(makeEnemy(num, x, y, ri, r));
+          break;
+        }
+      }
+    });
+
+    // Items: 1-3 per floor on free room floor tiles.
+    var itemCount = rng.int(1, 3);
+    for (var n = 0; n < itemCount; n++) {
+      for (var attempt = 0; attempt < 50; attempt++) {
+        var r = rng.pick(f.rooms);
+        var x = r.x + rng.int(0, r.w - 1), y = r.y + rng.int(0, r.h - 1);
+        var i = idx(x, y);
+        if (f.tiles[i] !== T_FLOOR || f.items[i] || enemyAtIn(f, x, y)) continue;
+        if (x === f.start.x && y === f.start.y) continue;
+        f.items[i] = makeItem(rng.pick(ITEM_TYPES), num, rng);
+        break;
+      }
+    }
+
+    buildWalls(f);
+    return f;
+  }
+
+  function generateFloor(num, seed, rng) {
+    var t0 = (window.performance && performance.now) ? performance.now() : Date.now();
+    var f = (num === 1 && seed === TEST_SEED) ? generateTestFloor(rng) : generateBspFloor(num, rng);
+    var t1 = (window.performance && performance.now) ? performance.now() : Date.now();
+    devLog('info', 'generator', 'Floor generated', {
+      floor: num, test: f.test, rooms: f.rooms.length, enemies: f.enemies.length,
+      items: Object.keys(f.items).length, ms: Math.round((t1 - t0) * 100) / 100
+    });
+    return f;
+  }
+
+  // ---------------------------------------------------------------------
+  // Game state
+  // ---------------------------------------------------------------------
+  var fixedSeed = parseSeedParam();
+  var game = null;
+
+  function newPlayer() {
+    return { x: 0, y: 0, hp: 20, maxHp: 20, baseAtk: 5, baseDef: 1, weapon: null, armor: null, inv: [] };
+  }
+  function playerAtk() { return game.player.baseAtk + (game.player.weapon ? game.player.weapon.value : 0); }
+  function playerDef() { return game.player.baseDef + (game.player.armor ? game.player.armor.value : 0); }
+
+  function newRun() {
+    var seed = fixedSeed !== null ? fixedSeed : Date.now();
+    game = {
+      seed: seed, rng: makeRng(seed), mode: 'play',
+      floorNum: 1, floor: null, player: newPlayer(),
+      kills: 0, log: [], invCursor: 0
+    };
+    devLog('info', 'game', 'New run started', { seed: seed });
+    enterFloor(1);
+    addLog('You enter the dungeon. Find the stairs (>) to descend.');
+    hideOverlays();
+    render();
+  }
+
+  function enterFloor(num) {
+    game.floorNum = num;
+    game.floor = generateFloor(num, game.seed, game.rng);
+    game.player.x = game.floor.start.x;
+    game.player.y = game.floor.start.y;
+    updateSight();
+    activateRoom();
+  }
+
+  function addLog(msg) {
+    game.log.push(msg);
+    while (game.log.length > LOG_MAX) game.log.shift();
+    logDirty = true;
+  }
+
+  function enemyAt(x, y) { return enemyAtIn(game.floor, x, y); }
+  function tileAt(x, y) { return inBounds(x, y) ? game.floor.tiles[idx(x, y)] : T_EMPTY; }
+
+  function roomIndexAt(x, y) {
+    var rooms = game.floor.rooms;
+    for (var i = 0; i < rooms.length; i++) if (inRect(rooms[i], x, y)) return i;
+    return -1;
+  }
+
+  function updateSight() {
+    var p = game.player, seen = game.floor.seen;
+    for (var dy = -SIGHT; dy <= SIGHT; dy++) {
+      for (var dx = -SIGHT; dx <= SIGHT; dx++) {
+        var x = p.x + dx, y = p.y + dy;
+        if (inBounds(x, y)) seen[idx(x, y)] = 1;
+      }
+    }
+  }
+
+  // Room-wide aggro (R103)
+  function activateRoom() {
+    var ri = roomIndexAt(game.player.x, game.player.y);
+    if (ri < 0) return;
+    var woke = 0;
+    game.floor.enemies.forEach(function (e) {
+      if (!e.active && e.room === ri) { e.active = true; woke++; }
+    });
+    if (woke > 0) {
+      addLog(woke === 1 ? 'An enemy notices you!' : woke + ' enemies notice you!');
+      devLog('info', 'ai', 'Room enemies activated', { room: ri, count: woke });
+    }
+  }
+
+  // ---------------------------------------------------------------------
+  // Turn resolution
+  // ---------------------------------------------------------------------
+  function tryMove(dx, dy) {
+    if (game.mode !== 'play' || (dx === 0 && dy === 0)) return;
+    var p = game.player;
+    var nx = p.x + dx, ny = p.y + dy;
+    if (!inBounds(nx, ny)) return;
+
+    var target = enemyAt(nx, ny);
+    if (target) {
+      attackEnemy(target);
+      endTurn();
+      return;
+    }
+
+    var t = tileAt(nx, ny);
+    if (t !== T_FLOOR && t !== T_STAIRS) return;  // wall/void: blocked, no turn passes
+
+    p.x = nx; p.y = ny;
+    if (t === T_STAIRS) { descend(); return; }    // enemies do not act on the descent turn
+    pickupItem();
+    updateSight();
+    activateRoom();
+    endTurn();
+  }
+
+  function attackEnemy(e) {
+    var dmg = Math.max(1, playerAtk() - e.defense);
+    e.hp -= dmg;
+    addLog('You hit ' + e.name + ' for ' + dmg + '.');
+    if (e.hp <= 0) {
+      var f = game.floor;
+      f.enemies.splice(f.enemies.indexOf(e), 1);
+      game.kills++;
+      addLog('You defeated the ' + e.name + '!');
+      devLog('info', 'combat', 'Enemy killed', { enemy: e.name, x: e.x, y: e.y, kills: game.kills });
+      if (game.rng.next() < 0.25) {
+        var i = idx(e.x, e.y);
+        if (!f.items[i] && f.tiles[i] === T_FLOOR) {
+          var drop = makeItem(game.rng.pick(ITEM_TYPES), game.floorNum, game.rng);
+          f.items[i] = drop;
+          addLog(e.name + ' dropped ' + describeItem(drop) + '.');
+        }
+      }
+    }
+  }
+
+  function pickupItem() {
+    var p = game.player, f = game.floor, i = idx(p.x, p.y);
+    var it = f.items[i];
+    if (!it) return;
+    if (p.inv.length >= INV_MAX) {
+      addLog('Inventory full! ' + describeItem(it) + ' left on the floor.');
+      return;
+    }
+    p.inv.push(it);
+    delete f.items[i];
+    addLog('You pick up ' + describeItem(it) + '.');
+  }
+
+  function canEnemyEnter(x, y) {
+    if (!inBounds(x, y)) return false;
+    if (game.floor.tiles[idx(x, y)] !== T_FLOOR) return false;   // walls, void and stairs blocked
+    if (x === game.player.x && y === game.player.y) return false;
+    return !enemyAt(x, y);
+  }
+
+  var DIRS8 = [[-1, -1], [0, -1], [1, -1], [-1, 0], [1, 0], [-1, 1], [0, 1], [1, 1]];
+
+  function enemyPhase() {
+    var p = game.player;
+    var enemies = game.floor.enemies;
+    for (var n = 0; n < enemies.length; n++) {
+      var e = enemies[n];
+      if (e.active) {
+        var dist = cheb(e.x, e.y, p.x, p.y);
+        if (dist <= 1) {
+          var dmg = Math.max(1, e.attack - playerDef());
+          p.hp -= dmg;
+          addLog(e.name + ' hits you for ' + dmg + '.');
+          if (p.hp <= 0) { p.hp = 0; return; }
+          continue;
+        }
+        // Greedy step: preferred direction first, then alternates that do not
+        // move the enemy farther away (wall-sliding). No pathfinding.
+        var sx = sign(p.x - e.x), sy = sign(p.y - e.y);
+        var cands = DIRS8.map(function (d) {
+          var x = e.x + d[0], y = e.y + d[1];
+          return {
+            x: x, y: y,
+            pref: (d[0] === sx && d[1] === sy) ? 0 : 1,
+            c: cheb(x, y, p.x, p.y),
+            e2: (x - p.x) * (x - p.x) + (y - p.y) * (y - p.y)
+          };
+        }).filter(function (c) { return c.c <= dist; });
+        cands.sort(function (a, b) { return a.pref - b.pref || a.c - b.c || a.e2 - b.e2; });
+        for (var k = 0; k < cands.length; k++) {
+          if (canEnemyEnter(cands[k].x, cands[k].y)) { e.x = cands[k].x; e.y = cands[k].y; break; }
+        }
+      } else {
+        // Idle patrol inside the spawning room.
+        var opts = [];
+        for (var j = 0; j < DIRS8.length; j++) {
+          var px = e.x + DIRS8[j][0], py = e.y + DIRS8[j][1];
+          if (inRect(e.patrol, px, py) && canEnemyEnter(px, py)) opts.push({ x: px, y: py });
+        }
+        if (opts.length) { var o = game.rng.pick(opts); e.x = o.x; e.y = o.y; }
+      }
+    }
+  }
+
+  function endTurn() {
+    enemyPhase();
+    updateSight();
+    if (game.player.hp <= 0) {
+      gameOver();
+      return;
+    }
+    render();
+  }
+
+  function descend() {
+    if (game.floorNum >= MAX_FLOOR) {
+      victory();
+      return;
+    }
+    enterFloor(game.floorNum + 1);
+    addLog('You descend to floor ' + game.floorNum + '.');
+    devLog('info', 'game', 'Descended', { floor: game.floorNum });
+    render();
+  }
+
+  function gameOver() {
+    game.mode = 'gameover';
+    addLog('You have died.');
+    devLog('info', 'game', 'Game over', { floor: game.floorNum, kills: game.kills, seed: game.seed });
+    render();
+    document.getElementById('go-floor').textContent = game.floorNum;
+    document.getElementById('go-kills').textContent = game.kills;
+    document.getElementById('go-seed').textContent = game.seed;
+    showOverlay('gameover');
+  }
+
+  function victory() {
+    game.mode = 'victory';
+    addLog('You escaped the dungeon!');
+    devLog('info', 'game', 'Victory', { floor: game.floorNum, kills: game.kills, seed: game.seed });
+    render();
+    document.getElementById('vi-floor').textContent = game.floorNum;
+    document.getElementById('vi-kills').textContent = game.kills;
+    document.getElementById('vi-seed').textContent = game.seed;
+    showOverlay('victory');
+  }
+
+  // ---------------------------------------------------------------------
+  // Inventory (FR-019)
+  // ---------------------------------------------------------------------
+  function openInventory() {
+    game.mode = 'inventory';
+    game.invCursor = Math.min(game.invCursor, INV_MAX - 1);
+    renderInventory();
+    showOverlay('inventory');
+  }
+
+  function closeInventory() {
+    game.mode = 'play';
+    hideOverlays();
+    render();
+  }
+
+  function useSelected() {
+    var p = game.player;
+    var it = p.inv[game.invCursor];
+    if (!it) return;
+    if (it.type === 'potion') {
+      var before = p.hp;
+      p.hp = Math.min(p.maxHp, p.hp + it.value);
+      p.inv.splice(game.invCursor, 1);
+      addLog('You drink the ' + it.name + ' and recover ' + (p.hp - before) + ' HP.');
+    } else if (it.type === 'weapon') {
+      p.inv[game.invCursor] = p.weapon;
+      p.weapon = it;
+      if (!p.inv[game.invCursor]) p.inv.splice(game.invCursor, 1);
+      addLog('You wield ' + describeItem(it) + '.');
+    } else {
+      p.inv[game.invCursor] = p.armor;
+      p.armor = it;
+      if (!p.inv[game.invCursor]) p.inv.splice(game.invCursor, 1);
+      addLog('You wear ' + describeItem(it) + '.');
+    }
+    renderHud();
+    renderInventory();
+  }
+
+  function renderInventory() {
+    var p = game.player;
+    var eq = document.getElementById('inv-equipped');
+    eq.textContent = '';
+    [['Weapon', p.weapon], ['Armor', p.armor]].forEach(function (pair) {
+      var div = document.createElement('div');
+      div.appendChild(document.createTextNode(pair[0] + ': '));
+      var s = document.createElement('span');
+      if (pair[1]) { s.className = 'it'; s.textContent = describeItem(pair[1]); } else s.textContent = '(none)';
+      div.appendChild(s);
+      eq.appendChild(div);
+    });
+    var list = document.getElementById('inv-list');
+    list.textContent = '';
+    for (var i = 0; i < INV_MAX; i++) {
+      var li = document.createElement('li');
+      var it = p.inv[i];
+      if (i === game.invCursor) li.className = 'sel';
+      li.appendChild(document.createTextNode((i === game.invCursor ? '> ' : '  ') + (i + 1 < 10 ? ' ' : '') + (i + 1) + '. '));
+      var span = document.createElement('span');
+      if (it) { span.className = 'it'; span.textContent = it.glyph + ' ' + describeItem(it); } else span.textContent = '— empty —';
+      li.appendChild(span);
+      list.appendChild(li);
+    }
+  }
+
+  // ---------------------------------------------------------------------
+  // Rendering
+  // ---------------------------------------------------------------------
+  var gridEl = document.getElementById('grid');
+  var dungeonEl = document.getElementById('dungeon');
+  var logEl = document.getElementById('log');
+  var hintEl = document.getElementById('hint');
+  var cells = new Array(W * H);
+  var cellGlyph = new Array(W * H);
+  var cellClass = new Array(W * H);
+  var logDirty = true;
+
+  (function buildGrid() {
+    var frag = document.createDocumentFragment();
+    for (var i = 0; i < W * H; i++) {
+      var s = document.createElement('span');
+      s.className = 'h';
+      cells[i] = s; cellGlyph[i] = ''; cellClass[i] = 'h';
+      frag.appendChild(s);
+    }
+    gridEl.appendChild(frag);
+  })();
+
+  function render() {
+    var f = game.floor, p = game.player;
+    var enemyMap = {};
+    f.enemies.forEach(function (e) { enemyMap[idx(e.x, e.y)] = e; });
+    for (var y = 0; y < H; y++) {
+      for (var x = 0; x < W; x++) {
+        var i = idx(x, y), g, c;
+        var t = f.tiles[i];
+        if (!f.seen[i]) { g = ''; c = 'h'; }
+        else if (cheb(x, y, p.x, p.y) <= SIGHT) {
+          if (x === p.x && y === p.y) { g = '@'; c = 'p'; }
+          else if (enemyMap[i]) { g = enemyMap[i].glyph; c = 'e'; }
+          else if (f.items[i]) { g = f.items[i].glyph; c = 'i'; }
+          else if (t === T_EMPTY) { g = ''; c = 'h'; }
+          else { g = TILE_GLYPH[t]; c = 'g'; }
+        } else {
+          if (t === T_EMPTY) { g = ''; c = 'h'; }
+          else { g = TILE_GLYPH[t]; c = 'd'; }
+        }
+        if (cellGlyph[i] !== g) { cells[i].textContent = g; cellGlyph[i] = g; }
+        if (cellClass[i] !== c) { cells[i].className = c; cellClass[i] = c; }
+      }
+    }
+    renderHud();
+    centerOnPlayer();
+  }
+
+  function renderHud() {
+    var p = game.player;
+    document.getElementById('hp').textContent = p.hp;
+    document.getElementById('maxhp').textContent = p.maxHp;
+    document.getElementById('atk').textContent = playerAtk();
+    document.getElementById('def').textContent = playerDef();
+    document.getElementById('level').textContent = game.floorNum;
+    document.getElementById('floor').textContent = game.floorNum;
+    document.getElementById('kills').textContent = game.kills;
+    if (game.floorNum === 1) hintEl.classList.remove('hidden'); else hintEl.classList.add('hidden');
+    if (logDirty) {
+      logEl.textContent = '';
+      var frag = document.createDocumentFragment();
+      game.log.forEach(function (line) {
+        var d = document.createElement('div');
+        d.textContent = line;
+        frag.appendChild(d);
+      });
+      logEl.appendChild(frag);
+      logEl.scrollTop = logEl.scrollHeight;
+      logDirty = false;
+    }
+  }
+
+  function centerOnPlayer() {
+    var p = game.player;
+    var offX = gridEl.offsetLeft - dungeonEl.offsetLeft;
+    var offY = gridEl.offsetTop - dungeonEl.offsetTop;
+    dungeonEl.scrollLeft = Math.max(0, offX + p.x * CELL + CELL / 2 - dungeonEl.clientWidth / 2);
+    dungeonEl.scrollTop = Math.max(0, offY + p.y * CELL + CELL / 2 - dungeonEl.clientHeight / 2);
+  }
+
+  function showOverlay(id) {
+    hideOverlays();
+    document.getElementById(id).classList.add('active');
+  }
+  function hideOverlays() {
+    ['inventory', 'gameover', 'victory'].forEach(function (id) {
+      document.getElementById(id).classList.remove('active');
+    });
+    dungeonEl.focus();
+  }
+
+  // ---------------------------------------------------------------------
+  // Input (FR-004, FR-027)
+  // Simultaneously held directional keys combine into a diagonal; sequential
+  // presses resolve one at a time (last press wins per axis within a window).
+  // ---------------------------------------------------------------------
+  var MOVE_KEYS = {
+    w: [0, -1], ArrowUp: [0, -1], s: [0, 1], ArrowDown: [0, 1],
+    a: [-1, 0], ArrowLeft: [-1, 0], d: [1, 0], ArrowRight: [1, 0]
+  };
+  var held = {};
+  var heldOrder = [];
+  var pending = null;
+  var pendingTimer = null;
+
+  function normKey(e) { return e.key && e.key.length === 1 ? e.key.toLowerCase() : e.key; }
+
+  function combine(keys) {
+    var dx = 0, dy = 0;
+    keys.forEach(function (k) {
+      var v = MOVE_KEYS[k];
+      if (!v) return;
+      if (v[0] !== 0) dx = v[0];
+      if (v[1] !== 0) dy = v[1];
+    });
+    return [dx, dy];
+  }
+
+  function flushPending() {
+    if (pendingTimer) { clearTimeout(pendingTimer); pendingTimer = null; }
+    if (!pending) return;
+    var keys = heldOrder.filter(function (k) { return pending.indexOf(k) < 0; }).concat(pending);
+    pending = null;
+    var d = combine(keys);
+    tryMove(d[0], d[1]);
+  }
+
+  function releaseKey(k) {
+    if (held[k]) {
+      delete held[k];
+      heldOrder = heldOrder.filter(function (h) { return h !== k; });
+    }
+  }
+
+  document.addEventListener('keydown', function (e) {
+    var k = normKey(e);
+    if (!game) return;
+    try {
+      if (game.mode === 'gameover' || game.mode === 'victory') {
+        if (k === 'r') { e.preventDefault(); newRun(); }
+        return;
+      }
+      if (game.mode === 'inventory') {
+        if (k === 'Escape' || k === 'i') { e.preventDefault(); closeInventory(); }
+        else if (k === 'ArrowUp' || k === 'w') { e.preventDefault(); game.invCursor = (game.invCursor + INV_MAX - 1) % INV_MAX; renderInventory(); }
+        else if (k === 'ArrowDown' || k === 's') { e.preventDefault(); game.invCursor = (game.invCursor + 1) % INV_MAX; renderInventory(); }
+        else if (k === 'Enter') { e.preventDefault(); useSelected(); }
+        return;
+      }
+      if (k === 'i') { e.preventDefault(); pending = null; openInventory(); return; }
+      if (MOVE_KEYS[k]) {
+        e.preventDefault();
+        if (e.repeat) {
+          if (!pending) { var d = combine(heldOrder); tryMove(d[0], d[1]); }
+          return;
+        }
+        if (!held[k]) { held[k] = true; heldOrder.push(k); }
+        if (!pending) {
+          pending = [];
+          pendingTimer = setTimeout(flushPending, DIAGONAL_WINDOW_MS);
+        }
+        pending.push(k);
+      }
+    } catch (err) {
+      devLog('error', 'input', 'Unhandled error processing key', { key: k, error: String(err) });
+    }
+  });
+
+  document.addEventListener('keyup', function (e) {
+    var k = normKey(e);
+    if (!MOVE_KEYS[k]) return;
+    var wasPending = pending && pending.indexOf(k) >= 0;
+    releaseKey(k);
+    if (wasPending) flushPending();
+  });
+
+  window.addEventListener('blur', function () { held = {}; heldOrder = []; });
+  document.addEventListener('mousedown', function () { setTimeout(function () { dungeonEl.focus(); }, 0); });
+  window.addEventListener('resize', function () { if (game) centerOnPlayer(); });
+
+  newRun();
+})();
+</script>
+</body>
+</html>
