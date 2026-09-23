@@ -1,0 +1,23 @@
+{
+  "name": "riptide-dungeon-crawler",
+  "version": "1.0.0",
+  "description": "simple spec for rogue-like dungeon crawler game, used for testing SDD (spec drift) and spec-eval tooling.",
+  "scripts": {
+    "test": "playwright test"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/j1010001/spec-test-dungeon-crawler.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/j1010001/spec-test-dungeon-crawler/issues"
+  },
+  "homepage": "https://github.com/j1010001/spec-test-dungeon-crawler#readme",
+  "devDependencies": {
+    "@playwright/test": "^1.63.0",
+    "playwright": "^1.63.0"
+  }
+}
